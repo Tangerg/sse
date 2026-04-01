@@ -13,36 +13,36 @@ type Encoder struct {
 
 func NewEncoder(w io.Writer) (*Encoder, error) {
 	if w == nil {
-		return nil, errors.New("w cannot be nil")
+		return nil, errors.New("sse: encoder writer cannot be nil")
 	}
 	return &Encoder{w: w}, nil
 }
 
-func (e *Encoder) writeID(id string, buffer *bytes.Buffer) {
+func (e *Encoder) writeID(id string, buf *bytes.Buffer) {
 	if len(id) == 0 {
 		return
 	}
 
-	buffer.WriteString(fieldID)
-	buffer.WriteString(colon)
-	buffer.WriteString(space)
-	buffer.WriteString(id)
-	buffer.WriteString(lf)
+	buf.WriteString(fieldID)
+	buf.WriteString(colon)
+	buf.WriteString(space)
+	buf.WriteString(id)
+	buf.WriteString(lf)
 }
 
-func (e *Encoder) writeEvent(event string, buffer *bytes.Buffer) {
+func (e *Encoder) writeEvent(event string, buf *bytes.Buffer) {
 	if len(event) == 0 {
 		return
 	}
 
-	buffer.WriteString(fieldEvent)
-	buffer.WriteString(colon)
-	buffer.WriteString(space)
-	buffer.WriteString(event)
-	buffer.WriteString(lf)
+	buf.WriteString(fieldEvent)
+	buf.WriteString(colon)
+	buf.WriteString(space)
+	buf.WriteString(event)
+	buf.WriteString(lf)
 }
 
-func (e *Encoder) writeData(data []byte, buffer *bytes.Buffer) {
+func (e *Encoder) writeData(data []byte, buf *bytes.Buffer) {
 	if len(data) == 0 {
 		return
 	}
@@ -51,57 +51,60 @@ func (e *Encoder) writeData(data []byte, buffer *bytes.Buffer) {
 
 	lines := bytes.Split(data, []byte(lf))
 	for _, line := range lines {
-		buffer.WriteString(fieldData)
-		buffer.WriteString(colon)
-		buffer.WriteString(space)
-		buffer.Write(line)
-		buffer.WriteString(lf)
+		buf.WriteString(fieldData)
+		buf.WriteString(colon)
+		buf.WriteString(space)
+		buf.Write(line)
+		buf.WriteString(lf)
 	}
 }
 
-func (e *Encoder) writeRetry(retry int, buffer *bytes.Buffer) {
+func (e *Encoder) writeRetry(retry int, buf *bytes.Buffer) {
 	if retry <= 0 {
 		return
 	}
-	buffer.WriteString(fieldRetry)
-	buffer.WriteString(colon)
-	buffer.WriteString(space)
-	buffer.WriteString(strconv.Itoa(retry))
-	buffer.WriteString(lf)
+
+	buf.WriteString(fieldRetry)
+	buf.WriteString(colon)
+	buf.WriteString(space)
+	buf.WriteString(strconv.Itoa(retry))
+	buf.WriteString(lf)
 }
 
-func (e *Encoder) encodeMessage(msg Message) ([]byte, error) {
-	estimatedCapacity := len(msg.ID) + len(msg.Event) + 2*len(msg.Data) + 8
-	buffer := bytes.NewBuffer(make([]byte, 0, estimatedCapacity))
+func (e *Encoder) encode(msg Message) ([]byte, error) {
+	capacity := len(msg.ID) + len(msg.Event) + 2*len(msg.Data) + 8
+	buf := bytes.NewBuffer(make([]byte, 0, capacity))
 
-	e.writeID(msg.ID, buffer)
-	e.writeEvent(msg.Event, buffer)
-	e.writeData(msg.Data, buffer)
-	e.writeRetry(msg.Retry, buffer)
+	e.writeID(msg.ID, buf)
+	e.writeEvent(msg.Event, buf)
+	e.writeData(msg.Data, buf)
+	e.writeRetry(msg.Retry, buf)
 
-	buffer.WriteString(lf)
+	buf.WriteString(lf)
 
-	return buffer.Bytes(), nil
+	return buf.Bytes(), nil
 }
 
 func (e *Encoder) Message(msg Message) error {
-	chars, err := e.encodeMessage(msg)
+	encoded, err := e.encode(msg)
 	if err != nil {
 		return err
 	}
 
-	_, err = e.w.Write(chars)
+	_, err = e.w.Write(encoded)
 	return err
 }
 
 func (e *Encoder) Comment(comment string) error {
-	estimatedCapacity := len(comment)
-	buffer := bytes.NewBuffer(make([]byte, 0, estimatedCapacity))
-	buffer.WriteString(colon)
-	buffer.WriteString(space)
-	buffer.WriteString(comment)
-	buffer.WriteString(lf)
-	buffer.WriteString(lf)
-	_, err := e.w.Write(buffer.Bytes())
+	// ": " + comment + "\n" + "\n"
+	buf := bytes.NewBuffer(make([]byte, 0, len(comment)+4))
+
+	buf.WriteString(colon)
+	buf.WriteString(space)
+	buf.WriteString(comment)
+	buf.WriteString(lf)
+	buf.WriteString(lf)
+
+	_, err := e.w.Write(buf.Bytes())
 	return err
 }

@@ -1,12 +1,12 @@
 package sse
 
 const (
-	lf    = "\u000A"
-	cr    = "\u000D"
-	space = "\u0020"
-	colon = "\u003A"
+	lf    = "\n"
+	cr    = "\r"
+	space = " "
+	colon = ":"
 	bom   = "\uFEFF"
-	null  = "\u0000"
+	null  = "\x00"
 )
 
 const (
@@ -17,7 +17,7 @@ const (
 )
 
 const (
-	eventMessage = "message"
+	defaultEvent = "message"
 )
 
 type Message struct {
