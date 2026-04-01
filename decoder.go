@@ -11,14 +11,14 @@ import (
 	"unicode"
 )
 
-func dropCR(data []byte) []byte {
+func trimTrailingCR(data []byte) []byte {
 	if len(data) > 0 && data[len(data)-1] == cr[0] {
 		return data[0 : len(data)-1]
 	}
 	return data
 }
 
-func scanLinesSplit(data []byte, atEOF bool) (advance int, token []byte, err error) {
+func splitLine(data []byte, atEOF bool) (advance int, token []byte, err error) {
 	if atEOF && len(data) == 0 {
 		return 0, nil, nil
 	}
@@ -28,14 +28,15 @@ func scanLinesSplit(data []byte, atEOF bool) (advance int, token []byte, err err
 
 	if n >= 0 && r >= 0 {
 		if n == r+1 {
-			return n + 1, dropCR(data[0:n]), nil
+			return n + 1, trimTrailingCR(data[0:n]), nil
 		}
 
 		i := min(n, r)
-		return i + 1, dropCR(data[0:i]), nil
+		return i + 1, trimTrailingCR(data[0:i]), nil
 	}
+
 	if i := max(n, r); i >= 0 {
-		return i + 1, dropCR(data[0:i]), nil
+		return i + 1, trimTrailingCR(data[0:i]), nil
 	}
 
 	if atEOF {
@@ -45,60 +46,65 @@ func scanLinesSplit(data []byte, atEOF bool) (advance int, token []byte, err err
 	return 0, nil, nil
 }
 
-func skipLeadingUTF8BOM(reader io.Reader) (io.Reader, error) {
-	bufioReader := bufio.NewReader(reader)
-	char, _, err := bufioReader.ReadRune()
+func stripBOM(reader io.Reader) (io.Reader, error) {
+	br := bufio.NewReader(reader)
+
+	char, _, err := br.ReadRune()
 	if err != nil {
 		return nil, err
 	}
+
 	if string(char) != bom {
-		err = bufioReader.UnreadRune()
+		err = br.UnreadRune()
 		if err != nil {
 			return nil, err
 		}
 	}
-	return bufioReader, nil
+
+	return br, nil
 }
 
-func getLineScanner(reader io.Reader) (*bufio.Scanner, error) {
-	utf8BOM, err := skipLeadingUTF8BOM(reader)
+func newLineScanner(reader io.Reader) (*bufio.Scanner, error) {
+	stripped, err := stripBOM(reader)
 	if err != nil {
 		return nil, err
 	}
-	lineScanner := bufio.NewScanner(utf8BOM)
-	lineScanner.Split(scanLinesSplit)
 
-	return lineScanner, nil
+	scanner := bufio.NewScanner(stripped)
+	scanner.Split(splitLine)
+
+	return scanner, nil
 }
 
 type Decoder struct {
-	lastIDBuffer string
-	dataBuffer   *bytes.Buffer
-	eventBuffer  string
-	retryBuffer  int
+	lastEventID string
+	dataBuf     *bytes.Buffer
+	eventType   string
+	retryMs     int
 
-	lineScanner *bufio.Scanner
+	scanner *bufio.Scanner
 }
 
 func NewDecoder(reader io.Reader) (*Decoder, error) {
 	if reader == nil {
-		return nil, errors.New("nil reader")
+		return nil, errors.New("sse: decoder reader cannot be nil")
 	}
 
-	lineScanner, err := getLineScanner(reader)
+	scanner, err := newLineScanner(reader)
 	if err != nil {
 		return nil, err
 	}
+
 	return &Decoder{
-		lastIDBuffer: "",
-		dataBuffer:   bytes.NewBuffer(nil),
-		eventBuffer:  "",
-		retryBuffer:  0,
-		lineScanner:  lineScanner,
+		lastEventID: "",
+		dataBuf:     bytes.NewBuffer(nil),
+		eventType:   "",
+		retryMs:     0,
+		scanner:     scanner,
 	}, nil
 }
 
-func (d *Decoder) processLine(line string) {
+func (d *Decoder) parseLine(line string) {
 	if strings.HasPrefix(line, colon) {
 		return
 	}
@@ -114,19 +120,19 @@ func (d *Decoder) processLine(line string) {
 	switch field {
 	case fieldID:
 		if !strings.Contains(value, null) {
-			d.lastIDBuffer = value
+			d.lastEventID = value
 		}
 
 	case fieldEvent:
-		d.eventBuffer = value
+		d.eventType = value
 
 	case fieldData:
-		d.dataBuffer.WriteString(value)
-		d.dataBuffer.WriteString(lf)
+		d.dataBuf.WriteString(value)
+		d.dataBuf.WriteString(lf)
 
 	case fieldRetry:
-		for _, char := range []rune(value) {
-			if !unicode.IsDigit(char) {
+		for _, ch := range []rune(value) {
+			if !unicode.IsDigit(ch) {
 				return
 			}
 		}
@@ -134,57 +140,58 @@ func (d *Decoder) processLine(line string) {
 		if err != nil {
 			return
 		}
-		d.retryBuffer = retry
+		d.retryMs = retry
 	}
 }
 
-func (d *Decoder) dispatch() (Message, bool) {
-	if d.dataBuffer.Len() == 0 &&
-		d.retryBuffer == 0 {
-		d.dataBuffer.Reset()
-		d.eventBuffer = ""
+func (d *Decoder) buildEvent() (Message, bool) {
+	if d.dataBuf.Len() == 0 && d.retryMs == 0 {
+		d.dataBuf.Reset()
+		d.eventType = ""
 		return Message{}, false
 	}
 
-	data := bytes.TrimSuffix(d.dataBuffer.Bytes(), []byte(lf))
+	data := bytes.TrimSuffix(d.dataBuf.Bytes(), []byte(lf))
 
 	msg := Message{
-		ID:    d.lastIDBuffer,
-		Event: eventMessage,
+		ID:    d.lastEventID,
+		Event: defaultEvent,
 		Data:  data,
-		Retry: d.retryBuffer,
+		Retry: d.retryMs,
 	}
 
-	if d.eventBuffer != "" {
-		msg.Event = d.eventBuffer
+	if d.eventType != "" {
+		msg.Event = d.eventType
 	}
 
-	d.dataBuffer.Reset()
-	d.eventBuffer = ""
-	d.retryBuffer = 0
+	d.dataBuf.Reset()
+	d.eventType = ""
+	d.retryMs = 0
 
 	return msg, true
 }
 
 func (d *Decoder) Messages() iter.Seq2[Message, error] {
 	return func(yield func(Message, error) bool) {
-		for d.lineScanner.Scan() {
-			err := d.lineScanner.Err()
-			if err != nil {
+		for d.scanner.Scan() {
+			if err := d.scanner.Err(); err != nil {
 				yield(Message{}, err)
 				return
 			}
-			currentLine := d.lineScanner.Text()
-			if len(currentLine) == 0 {
-				message, ok := d.dispatch()
-				if !ok {
-					continue
+
+			line := d.scanner.Text()
+
+			if len(line) == 0 {
+				msg, ok := d.buildEvent()
+				if ok {
+					if !yield(msg, nil) {
+						return
+					}
 				}
-				if !yield(message, nil) {
-					return
-				}
+				continue
 			}
-			d.processLine(currentLine)
+
+			d.parseLine(line)
 		}
 	}
 }
