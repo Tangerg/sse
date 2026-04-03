@@ -8,6 +8,7 @@ import (
 	"iter"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -80,7 +81,7 @@ type Decoder struct {
 	lastEventID string
 	dataBuf     *bytes.Buffer
 	eventType   string
-	retryMs     int
+	retryMs     time.Duration
 
 	scanner *bufio.Scanner
 }
@@ -140,7 +141,7 @@ func (d *Decoder) parseLine(line string) {
 		if err != nil {
 			return
 		}
-		d.retryMs = retry
+		d.retryMs = time.Duration(retry) * time.Millisecond
 	}
 }
 

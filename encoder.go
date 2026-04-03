@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"strconv"
+	"time"
 )
 
 type Encoder struct {
@@ -59,7 +60,7 @@ func (e *Encoder) writeData(data []byte, buf *bytes.Buffer) {
 	}
 }
 
-func (e *Encoder) writeRetry(retry int, buf *bytes.Buffer) {
+func (e *Encoder) writeRetry(retry time.Duration, buf *bytes.Buffer) {
 	if retry <= 0 {
 		return
 	}
@@ -67,7 +68,7 @@ func (e *Encoder) writeRetry(retry int, buf *bytes.Buffer) {
 	buf.WriteString(fieldRetry)
 	buf.WriteString(colon)
 	buf.WriteString(space)
-	buf.WriteString(strconv.Itoa(retry))
+	buf.WriteString(strconv.FormatInt(retry.Milliseconds(), 10))
 	buf.WriteString(lf)
 }
 
