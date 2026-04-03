@@ -1,5 +1,7 @@
 package sse
 
+import "time"
+
 const (
 	lf    = "\n"
 	cr    = "\r"
@@ -24,5 +26,5 @@ type Message struct {
 	ID    string
 	Event string
 	Data  []byte
-	Retry int
+	Retry time.Duration
 }
