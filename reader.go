@@ -161,7 +161,7 @@ func (r *Reader) parseLine(line string) {
 	}
 }
 
-func (r *Reader) buildEvent() (Message, bool) {
+func (r *Reader) buildMessage() (Message, bool) {
 	if r.dataBuf.Len() == 0 && r.retryMs == 0 {
 		r.dataBuf.Reset()
 		r.eventType = ""
@@ -194,7 +194,7 @@ func (r *Reader) Messages() iter.Seq2[Message, error] {
 			line := r.scanner.Text()
 
 			if len(line) == 0 {
-				msg, ok := r.buildEvent()
+				msg, ok := r.buildMessage()
 				if ok {
 					if !yield(msg, nil) {
 						return
