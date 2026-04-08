@@ -155,8 +155,9 @@ func (r *Reader) buildMessage() (Message, bool) {
 	}
 
 	// The spec requires stripping the trailing LF that was appended after the
-	// last data line.
-	data := bytes.TrimSuffix(r.dataBuf.Bytes(), []byte(lf))
+	// last data line. Clone the slice so it does not alias the buffer's
+	// underlying memory, which will be overwritten on the next Reset.
+	data := bytes.Clone(bytes.TrimSuffix(r.dataBuf.Bytes(), []byte(lf)))
 
 	msg := Message{
 		ID:    r.lastEventID,

@@ -78,6 +78,58 @@ for msg, err := range reader.Messages() {
 }
 ```
 
+### Writing JSON data
+
+`Message.Data` is `[]byte`, so pass the output of `json.Marshal` directly:
+
+```go
+type OrderEvent struct {
+    OrderID string  `json:"order_id"`
+    Status  string  `json:"status"`
+    Total   float64 `json:"total"`
+}
+
+func handler(w http.ResponseWriter, r *http.Request) {
+    writer, err := sse.NewHTTPWriter(w)
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
+        return
+    }
+
+    payload, err := json.Marshal(OrderEvent{
+        OrderID: "ord_123",
+        Status:  "shipped",
+        Total:   59.90,
+    })
+    if err != nil {
+        return
+    }
+
+    writer.Message(sse.Message{
+        ID:    "1",
+        Event: "order.updated",
+        Data:  payload,
+    })
+}
+```
+
+On the client side, unmarshal `msg.Data` the same way:
+
+```go
+for msg, err := range reader.Messages() {
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    var evt OrderEvent
+    if err := json.Unmarshal(msg.Data, &evt); err != nil {
+        log.Fatal(err)
+    }
+
+    fmt.Printf("order %s is now %s\n", evt.OrderID, evt.Status)
+}
+```
+
 ### Reading events (plain io.Reader)
 
 ```go
