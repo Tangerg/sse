@@ -1,6 +1,7 @@
 package sse
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
@@ -11,23 +12,27 @@ import (
 	"time"
 )
 
-var _ io.Writer = (*httpWriteFlusher)(nil)
-
-type httpWriteFlusher struct {
+// flushWriter wraps an http.ResponseWriter and flushes after every write,
+// ensuring each SSE event is sent to the client immediately.
+type flushWriter struct {
 	rw      http.ResponseWriter
 	flusher http.Flusher
 }
 
-func (h *httpWriteFlusher) Write(p []byte) (int, error) {
-	n, err := h.rw.Write(p)
+var _ io.Writer = (*flushWriter)(nil)
+
+func (f *flushWriter) Write(p []byte) (int, error) {
+	n, err := f.rw.Write(p)
 	if err != nil {
 		return n, err
 	}
-	h.flusher.Flush()
+	f.flusher.Flush()
 	return n, nil
 }
 
-func applySSEHeaders(header http.Header) {
+// setSSEHeaders writes the required SSE response headers.
+// Cache-Control defaults to "no-cache" if not already set by the caller.
+func setSSEHeaders(header http.Header) {
 	header.Set("Content-Type", "text/event-stream; charset=utf-8")
 	header.Set("Connection", "keep-alive")
 
@@ -36,10 +41,12 @@ func applySSEHeaders(header http.Header) {
 	}
 }
 
+// Writer serialises SSE messages to an io.Writer.
 type Writer struct {
 	w io.Writer
 }
 
+// NewWriter creates a Writer that encodes SSE events to w.
 func NewWriter(w io.Writer) (*Writer, error) {
 	if w == nil {
 		return nil, errors.New("sse: writer cannot be nil")
@@ -47,6 +54,9 @@ func NewWriter(w io.Writer) (*Writer, error) {
 	return &Writer{w: w}, nil
 }
 
+// NewHTTPWriter creates a Writer for an HTTP response. It sets the required SSE
+// headers and wraps rw in a flushWriter so each event is flushed immediately.
+// rw must implement http.Flusher; most standard library handlers do.
 func NewHTTPWriter(rw http.ResponseWriter) (*Writer, error) {
 	if rw == nil {
 		return nil, errors.New("sse: http.ResponseWriter cannot be nil")
@@ -54,42 +64,41 @@ func NewHTTPWriter(rw http.ResponseWriter) (*Writer, error) {
 
 	flusher, ok := rw.(http.Flusher)
 	if !ok {
-		return nil, fmt.Errorf("sse: %T does not implement http.Flusher", rw)
+		return nil, fmt.Errorf("sse: %T does not implement http.Flusher; streaming is not supported", rw)
 	}
 
-	applySSEHeaders(rw.Header())
+	setSSEHeaders(rw.Header())
 
 	return &Writer{
-		w: &httpWriteFlusher{
+		w: &flushWriter{
 			rw:      rw,
 			flusher: flusher,
 		},
 	}, nil
 }
 
-var valueEscaper = strings.NewReplacer(
-	"\r\n", `\r\n`,
-	"\r", `\r`,
-	"\n", `\n`,
-)
-
+// fieldBuf is an in-memory buffer for building a single SSE event frame.
 type fieldBuf struct {
 	*bytes.Buffer
 }
 
-func newEventBuf(capacity int) *fieldBuf {
+func newFieldBuf(capacity int) *fieldBuf {
 	return &fieldBuf{bytes.NewBuffer(make([]byte, 0, capacity))}
 }
 
-// write writes one SSE line in the form "field: value\n".
-// If field is empty, it writes a comment line ": value\n".
+// newlineStripper removes CR and LF from field values before writing.
+// Per the SSE grammar, any-char excludes U+000A (LF) and U+000D (CR).
+var newlineStripper = strings.NewReplacer("\r\n", "", "\r", "", "\n", "")
+
+// write appends one SSE line in the form "field: value\n".
+// If field is empty, the line becomes a comment (": value\n").
 func (b *fieldBuf) write(field, value string) {
 	if field != "" {
 		b.WriteString(field)
 	}
 	b.WriteString(colon)
 	b.WriteString(space)
-	b.WriteString(valueEscaper.Replace(value))
+	b.WriteString(newlineStripper.Replace(value))
 	b.WriteString(lf)
 }
 
@@ -107,13 +116,25 @@ func (b *fieldBuf) writeEvent(event string) {
 	b.write(fieldEvent, event)
 }
 
+// writeData writes one "data: …\n" line per logical line in data.
+// If data ends with a line terminator, an extra empty data line is written so
+// the reader reconstructs the correct trailing newline.
 func (b *fieldBuf) writeData(data []byte) {
 	if len(data) == 0 {
 		return
 	}
 
-	for _, line := range bytes.Split(data, []byte(lf)) {
-		b.write(fieldData, string(line))
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Split(splitLine)
+	for scanner.Scan() {
+		b.write(fieldData, scanner.Text())
+	}
+
+	// splitLine returns (0, nil, nil) when atEOF and the buffer is empty,
+	// so the scanner never emits a trailing empty token. Write an explicit
+	// empty data line when the payload ends with a line terminator.
+	if last := data[len(data)-1]; last == lf[0] || last == cr[0] {
+		b.write(fieldData, "")
 	}
 }
 
@@ -131,8 +152,10 @@ func (b *fieldBuf) writeComment(comment string) {
 	b.write("", comment)
 }
 
+// Message encodes msg as an SSE event frame and writes it to the underlying
+// writer. Fields with zero values are omitted per the SSE spec.
 func (w *Writer) Message(msg Message) error {
-	buf := newEventBuf(len(msg.ID) + len(msg.Event) + 2*len(msg.Data) + 8)
+	buf := newFieldBuf(len(msg.ID) + len(msg.Event) + 2*len(msg.Data) + 8)
 
 	buf.writeID(msg.ID)
 	buf.writeEvent(msg.Event)
@@ -144,8 +167,10 @@ func (w *Writer) Message(msg Message) error {
 	return err
 }
 
+// Comment encodes comment as an SSE comment line (": comment\n\n") and writes
+// it to the underlying writer. Empty comments are silently ignored.
 func (w *Writer) Comment(comment string) error {
-	buf := newEventBuf(len(comment) + 4)
+	buf := newFieldBuf(len(comment) + 4)
 	buf.writeComment(comment)
 	buf.WriteString(lf)
 
