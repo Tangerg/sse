@@ -66,29 +66,41 @@ func NewHTTPWriter(rw http.ResponseWriter) (*Writer, error) {
 	}, nil
 }
 
-func writeField(field, value string, buf *bytes.Buffer) {
-	buf.WriteString(field)
-	buf.WriteString(colon)
-	buf.WriteString(space)
-	buf.WriteString(value)
-	buf.WriteString(lf)
+type eventBuf struct {
+	*bytes.Buffer
 }
 
-func writeID(id string, buf *bytes.Buffer) {
+func newEventBuf(capacity int) *eventBuf {
+	return &eventBuf{bytes.NewBuffer(make([]byte, 0, capacity))}
+}
+
+// write writes one SSE line in the form "field: value\n".
+// If field is empty, it writes a comment line ": value\n".
+func (b *eventBuf) write(field, value string) {
+	if field != "" {
+		b.WriteString(field)
+	}
+	b.WriteString(colon)
+	b.WriteString(space)
+	b.WriteString(value)
+	b.WriteString(lf)
+}
+
+func (b *eventBuf) writeID(id string) {
 	if len(id) == 0 {
 		return
 	}
-	writeField(fieldID, id, buf)
+	b.write(fieldID, id)
 }
 
-func writeEvent(event string, buf *bytes.Buffer) {
+func (b *eventBuf) writeEvent(event string) {
 	if len(event) == 0 {
 		return
 	}
-	writeField(fieldEvent, event, buf)
+	b.write(fieldEvent, event)
 }
 
-func writeData(data []byte, buf *bytes.Buffer) {
+func (b *eventBuf) writeData(data []byte) {
 	if len(data) == 0 {
 		return
 	}
@@ -96,26 +108,24 @@ func writeData(data []byte, buf *bytes.Buffer) {
 	data = bytes.ReplaceAll(data, []byte(cr), []byte{})
 
 	for _, line := range bytes.Split(data, []byte(lf)) {
-		writeField(fieldData, string(line), buf)
+		b.write(fieldData, string(line))
 	}
 }
 
-func writeRetry(retry time.Duration, buf *bytes.Buffer) {
+func (b *eventBuf) writeRetry(retry time.Duration) {
 	if retry <= 0 {
 		return
 	}
-	writeField(fieldRetry, strconv.FormatInt(retry.Milliseconds(), 10), buf)
+	b.write(fieldRetry, strconv.FormatInt(retry.Milliseconds(), 10))
 }
 
 func (w *Writer) encode(msg Message) []byte {
-	capacity := len(msg.ID) + len(msg.Event) + 2*len(msg.Data) + 8
-	buf := bytes.NewBuffer(make([]byte, 0, capacity))
+	buf := newEventBuf(len(msg.ID) + len(msg.Event) + 2*len(msg.Data) + 8)
 
-	writeID(msg.ID, buf)
-	writeEvent(msg.Event, buf)
-	writeData(msg.Data, buf)
-	writeRetry(msg.Retry, buf)
-
+	buf.writeID(msg.ID)
+	buf.writeEvent(msg.Event)
+	buf.writeData(msg.Data)
+	buf.writeRetry(msg.Retry)
 	buf.WriteString(lf)
 
 	return buf.Bytes()
@@ -127,13 +137,8 @@ func (w *Writer) Message(msg Message) error {
 }
 
 func (w *Writer) Comment(comment string) error {
-	// ": " + comment + "\n" + "\n"
-	buf := bytes.NewBuffer(make([]byte, 0, len(comment)+4))
-
-	buf.WriteString(colon)
-	buf.WriteString(space)
-	buf.WriteString(comment)
-	buf.WriteString(lf)
+	buf := newEventBuf(len(comment) + 4)
+	buf.write("", comment)
 	buf.WriteString(lf)
 
 	_, err := w.w.Write(buf.Bytes())
