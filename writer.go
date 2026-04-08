@@ -112,8 +112,6 @@ func (b *fieldBuf) writeData(data []byte) {
 		return
 	}
 
-	data = bytes.ReplaceAll(data, []byte(cr), []byte{})
-
 	for _, line := range bytes.Split(data, []byte(lf)) {
 		b.write(fieldData, string(line))
 	}
