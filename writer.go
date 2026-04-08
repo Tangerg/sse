@@ -66,67 +66,55 @@ func NewHTTPWriter(rw http.ResponseWriter) (*Writer, error) {
 	}, nil
 }
 
-func (w *Writer) writeID(id string, buf *bytes.Buffer) {
+func writeField(field, value string, buf *bytes.Buffer) {
+	buf.WriteString(field)
+	buf.WriteString(colon)
+	buf.WriteString(space)
+	buf.WriteString(value)
+	buf.WriteString(lf)
+}
+
+func writeID(id string, buf *bytes.Buffer) {
 	if len(id) == 0 {
 		return
 	}
-
-	buf.WriteString(fieldID)
-	buf.WriteString(colon)
-	buf.WriteString(space)
-	buf.WriteString(id)
-	buf.WriteString(lf)
+	writeField(fieldID, id, buf)
 }
 
-func (w *Writer) writeEvent(event string, buf *bytes.Buffer) {
+func writeEvent(event string, buf *bytes.Buffer) {
 	if len(event) == 0 {
 		return
 	}
-
-	buf.WriteString(fieldEvent)
-	buf.WriteString(colon)
-	buf.WriteString(space)
-	buf.WriteString(event)
-	buf.WriteString(lf)
+	writeField(fieldEvent, event, buf)
 }
 
-func (w *Writer) writeData(data []byte, buf *bytes.Buffer) {
+func writeData(data []byte, buf *bytes.Buffer) {
 	if len(data) == 0 {
 		return
 	}
 
 	data = bytes.ReplaceAll(data, []byte(cr), []byte{})
 
-	lines := bytes.Split(data, []byte(lf))
-	for _, line := range lines {
-		buf.WriteString(fieldData)
-		buf.WriteString(colon)
-		buf.WriteString(space)
-		buf.Write(line)
-		buf.WriteString(lf)
+	for _, line := range bytes.Split(data, []byte(lf)) {
+		writeField(fieldData, string(line), buf)
 	}
 }
 
-func (w *Writer) writeRetry(retry time.Duration, buf *bytes.Buffer) {
+func writeRetry(retry time.Duration, buf *bytes.Buffer) {
 	if retry <= 0 {
 		return
 	}
-
-	buf.WriteString(fieldRetry)
-	buf.WriteString(colon)
-	buf.WriteString(space)
-	buf.WriteString(strconv.FormatInt(retry.Milliseconds(), 10))
-	buf.WriteString(lf)
+	writeField(fieldRetry, strconv.FormatInt(retry.Milliseconds(), 10), buf)
 }
 
 func (w *Writer) encode(msg Message) []byte {
 	capacity := len(msg.ID) + len(msg.Event) + 2*len(msg.Data) + 8
 	buf := bytes.NewBuffer(make([]byte, 0, capacity))
 
-	w.writeID(msg.ID, buf)
-	w.writeEvent(msg.Event, buf)
-	w.writeData(msg.Data, buf)
-	w.writeRetry(msg.Retry, buf)
+	writeID(msg.ID, buf)
+	writeEvent(msg.Event, buf)
+	writeData(msg.Data, buf)
+	writeRetry(msg.Retry, buf)
 
 	buf.WriteString(lf)
 
