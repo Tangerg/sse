@@ -66,17 +66,17 @@ func NewHTTPWriter(rw http.ResponseWriter) (*Writer, error) {
 	}, nil
 }
 
-type eventBuf struct {
+type fieldBuf struct {
 	*bytes.Buffer
 }
 
-func newEventBuf(capacity int) *eventBuf {
-	return &eventBuf{bytes.NewBuffer(make([]byte, 0, capacity))}
+func newEventBuf(capacity int) *fieldBuf {
+	return &fieldBuf{bytes.NewBuffer(make([]byte, 0, capacity))}
 }
 
 // write writes one SSE line in the form "field: value\n".
 // If field is empty, it writes a comment line ": value\n".
-func (b *eventBuf) write(field, value string) {
+func (b *fieldBuf) write(field, value string) {
 	if field != "" {
 		b.WriteString(field)
 	}
@@ -86,21 +86,21 @@ func (b *eventBuf) write(field, value string) {
 	b.WriteString(lf)
 }
 
-func (b *eventBuf) writeID(id string) {
+func (b *fieldBuf) writeID(id string) {
 	if len(id) == 0 {
 		return
 	}
 	b.write(fieldID, id)
 }
 
-func (b *eventBuf) writeEvent(event string) {
+func (b *fieldBuf) writeEvent(event string) {
 	if len(event) == 0 {
 		return
 	}
 	b.write(fieldEvent, event)
 }
 
-func (b *eventBuf) writeData(data []byte) {
+func (b *fieldBuf) writeData(data []byte) {
 	if len(data) == 0 {
 		return
 	}
@@ -112,14 +112,14 @@ func (b *eventBuf) writeData(data []byte) {
 	}
 }
 
-func (b *eventBuf) writeRetry(retry time.Duration) {
+func (b *fieldBuf) writeRetry(retry time.Duration) {
 	if retry <= 0 {
 		return
 	}
 	b.write(fieldRetry, strconv.FormatInt(retry.Milliseconds(), 10))
 }
 
-func (b *eventBuf) writeComment(comment string) {
+func (b *fieldBuf) writeComment(comment string) {
 	if len(comment) == 0 {
 		return
 	}
