@@ -191,11 +191,6 @@ func (r *Reader) buildEvent() (Message, bool) {
 func (r *Reader) Messages() iter.Seq2[Message, error] {
 	return func(yield func(Message, error) bool) {
 		for r.scanner.Scan() {
-			if err := r.scanner.Err(); err != nil {
-				yield(Message{}, err)
-				return
-			}
-
 			line := r.scanner.Text()
 
 			if len(line) == 0 {
@@ -209,6 +204,10 @@ func (r *Reader) Messages() iter.Seq2[Message, error] {
 			}
 
 			r.parseLine(line)
+		}
+
+		if err := r.scanner.Err(); err != nil {
+			yield(Message{}, err)
 		}
 	}
 }
