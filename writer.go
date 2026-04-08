@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -66,6 +67,12 @@ func NewHTTPWriter(rw http.ResponseWriter) (*Writer, error) {
 	}, nil
 }
 
+var valueEscaper = strings.NewReplacer(
+	"\r\n", `\r\n`,
+	"\r", `\r`,
+	"\n", `\n`,
+)
+
 type fieldBuf struct {
 	*bytes.Buffer
 }
@@ -82,7 +89,7 @@ func (b *fieldBuf) write(field, value string) {
 	}
 	b.WriteString(colon)
 	b.WriteString(space)
-	b.WriteString(value)
+	b.WriteString(valueEscaper.Replace(value))
 	b.WriteString(lf)
 }
 
