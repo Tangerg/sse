@@ -119,7 +119,14 @@ func (b *eventBuf) writeRetry(retry time.Duration) {
 	b.write(fieldRetry, strconv.FormatInt(retry.Milliseconds(), 10))
 }
 
-func (w *Writer) encode(msg Message) []byte {
+func (b *eventBuf) writeComment(comment string) {
+	if len(comment) == 0 {
+		return
+	}
+	b.write("", comment)
+}
+
+func (w *Writer) Message(msg Message) error {
 	buf := newEventBuf(len(msg.ID) + len(msg.Event) + 2*len(msg.Data) + 8)
 
 	buf.writeID(msg.ID)
@@ -128,17 +135,13 @@ func (w *Writer) encode(msg Message) []byte {
 	buf.writeRetry(msg.Retry)
 	buf.WriteString(lf)
 
-	return buf.Bytes()
-}
-
-func (w *Writer) Message(msg Message) error {
-	_, err := w.w.Write(w.encode(msg))
+	_, err := w.w.Write(buf.Bytes())
 	return err
 }
 
 func (w *Writer) Comment(comment string) error {
 	buf := newEventBuf(len(comment) + 4)
-	buf.write("", comment)
+	buf.writeComment(comment)
 	buf.WriteString(lf)
 
 	_, err := w.w.Write(buf.Bytes())
