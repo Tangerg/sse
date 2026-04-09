@@ -56,11 +56,12 @@ type Writer struct {
 }
 
 // NewWriter creates a [Writer] that encodes SSE events to w.
-func NewWriter(w io.Writer) (*Writer, error) {
+// Panics if w is nil.
+func NewWriter(w io.Writer) *Writer {
 	if w == nil {
-		return nil, errors.New("sse: writer cannot be nil")
+		panic("sse: writer cannot be nil")
 	}
-	return &Writer{w: w}, nil
+	return &Writer{w: w}
 }
 
 // NewHTTPWriter creates a [Writer] for an HTTP response. It sets the required
@@ -84,7 +85,7 @@ func NewHTTPWriter(rw http.ResponseWriter) (*Writer, error) {
 	return NewWriter(&flushWriter{
 		rw:      rw,
 		flusher: flusher,
-	})
+	}), nil
 }
 
 // fieldBuf is an in-memory buffer for building a single SSE event frame before

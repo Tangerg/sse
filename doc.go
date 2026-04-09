@@ -67,9 +67,9 @@
 //	    sw.Comment(r.Context(), "keep-alive") // heartbeat
 //	}
 //
-// For non-HTTP destinations use [NewWriter]:
+// For non-HTTP destinations use [NewWriter]. It panics if w is nil:
 //
-//	sw, err := sse.NewWriter(w)
+//	sw := sse.NewWriter(w)
 //
 // # Reading events
 //
@@ -92,11 +92,13 @@
 //
 //	resp.Body.Close()
 //
-// For non-HTTP sources use [NewReader]. Both constructors accept an optional
-// buffer-size argument (in bytes) that overrides the default 64 KiB per-line
-// scanner limit:
+// For non-HTTP sources use [NewReader], which panics if r is nil. Both
+// constructors accept an optional buffer-size argument (in bytes) that
+// overrides the default 64 KiB per-line scanner limit. No I/O is performed
+// during construction; the underlying scanner is initialised lazily on the
+// first call to [Reader.Messages]:
 //
-//	sr, err := sse.NewReader(r, 1<<20) // 1 MiB limit
+//	sr := sse.NewReader(r, 1<<20) // 1 MiB limit
 //
 // # Heartbeats (§9.2.7)
 //
