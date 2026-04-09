@@ -1,6 +1,7 @@
 package sse
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"strings"
@@ -16,7 +17,7 @@ func collectMessages(input string) ([]Message, error) {
 	}
 
 	var msgs []Message
-	for msg, err := range r.Messages() {
+	for msg, err := range r.Messages(context.Background()) {
 		if err != nil {
 			return msgs, err
 		}
@@ -75,6 +76,23 @@ func TestNewReader(t *testing.T) {
 		}
 		if r == nil {
 			t.Error("expected non-nil Reader")
+		}
+	})
+
+	t.Run("custom bufSize applied", func(t *testing.T) {
+		r, err := NewReader(strings.NewReader("data: hello\n\n"), 1024*1024)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var msgs []Message
+		for msg, err := range r.Messages(context.Background()) {
+			if err != nil {
+				t.Fatal(err)
+			}
+			msgs = append(msgs, msg)
+		}
+		if len(msgs) != 1 || string(msgs[0].Data) != "hello" {
+			t.Errorf("unexpected messages: %v", msgs)
 		}
 	})
 }

@@ -3,6 +3,7 @@ package sse
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -69,12 +70,10 @@ func NewHTTPWriter(rw http.ResponseWriter) (*Writer, error) {
 
 	setSSEHeaders(rw.Header())
 
-	return &Writer{
-		w: &flushWriter{
-			rw:      rw,
-			flusher: flusher,
-		},
-	}, nil
+	return NewWriter(&flushWriter{
+		rw:      rw,
+		flusher: flusher,
+	})
 }
 
 // fieldBuf is an in-memory buffer for building a single SSE event frame.
@@ -154,7 +153,12 @@ func (b *fieldBuf) writeComment(comment string) {
 
 // Message encodes msg as an SSE event frame and writes it to the underlying
 // writer. Fields with zero values are omitted per the SSE spec.
-func (w *Writer) Message(msg Message) error {
+// Returns ctx.Err() immediately if the context is already done.
+func (w *Writer) Message(ctx context.Context, msg Message) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	buf := newFieldBuf(len(msg.ID) + len(msg.Event) + 2*len(msg.Data) + 8)
 
 	buf.writeID(msg.ID)
@@ -169,7 +173,12 @@ func (w *Writer) Message(msg Message) error {
 
 // Comment encodes comment as an SSE comment line (": comment\n\n") and writes
 // it to the underlying writer. Empty comments are silently ignored.
-func (w *Writer) Comment(comment string) error {
+// Returns ctx.Err() immediately if the context is already done.
+func (w *Writer) Comment(ctx context.Context, comment string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	buf := newFieldBuf(len(comment) + 4)
 	buf.writeComment(comment)
 	buf.WriteString(lf)
