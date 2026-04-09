@@ -43,7 +43,11 @@ func stripBOM(r io.Reader) (io.Reader, error) {
 // newLineScanner strips the BOM from r (§9.2.6) and wraps the result in a
 // [bufio.Scanner] configured to split on all three SSE line endings defined in
 // §9.2.5 (CRLF, lone CR, lone LF) via [splitLine].
-func newLineScanner(r io.Reader) (*bufio.Scanner, error) {
+//
+// If bufSize is positive it overrides the scanner's default 64 KiB token
+// buffer; the same value is used as both the initial buffer size and the
+// maximum token size passed to [bufio.Scanner.Buffer].
+func newLineScanner(r io.Reader, bufSize int) (*bufio.Scanner, error) {
 	stripped, err := stripBOM(r)
 	if err != nil {
 		return nil, err
@@ -51,6 +55,10 @@ func newLineScanner(r io.Reader) (*bufio.Scanner, error) {
 
 	scanner := bufio.NewScanner(stripped)
 	scanner.Split(splitLine)
+
+	if bufSize > 0 {
+		scanner.Buffer(make([]byte, bufSize), bufSize)
+	}
 
 	return scanner, nil
 }
@@ -71,10 +79,14 @@ func newLineScanner(r io.Reader) (*bufio.Scanner, error) {
 //   - retry       – the reconnection-time hint from the "retry" field, carried
 //     in the Message and cleared after each dispatch.
 //
-// The scanner is created in [Reader.Messages] and captured by the returned
-// closure, so that [NewReader] never performs I/O and never returns an error.
+// The scanner is created lazily on the first call to [Reader.Messages] and
+// stored as a field. Subsequent calls to [Reader.Messages] reuse the same
+// scanner so that state is not inadvertently reset between iterations, and
+// [NewReader] never performs I/O and never returns an error.
 type Reader struct {
-	r io.Reader
+	r       io.Reader
+	scanner *bufio.Scanner
+	bufSize int
 
 	lastEventID string
 	dataBuf     *bytes.Buffer
@@ -85,15 +97,27 @@ type Reader struct {
 // NewReader creates a [Reader] that parses the SSE event stream from r.
 // Panics if r is nil.
 //
-// No I/O is performed during construction; the scanner is initialised on the
-// first call to [Reader.Messages].
-func NewReader(r io.Reader) *Reader {
+// The optional bufSize argument overrides the scanner's default 64 KiB token
+// buffer. Pass a larger value when the stream may contain lines exceeding
+// 64 KiB (e.g. large JSON payloads in a single data field). A zero or
+// negative value leaves the default unchanged. At most one value is used;
+// additional values are ignored.
+//
+// No I/O is performed during construction; the scanner is initialised lazily
+// on the first call to [Reader.Messages].
+func NewReader(r io.Reader, bufSize ...int) *Reader {
 	if r == nil {
 		panic("sse: reader cannot be nil")
 	}
 
+	size := 0
+	if len(bufSize) > 0 && bufSize[0] > 0 {
+		size = bufSize[0]
+	}
+
 	return &Reader{
 		r:       r,
+		bufSize: size,
 		dataBuf: bytes.NewBuffer(nil),
 	}
 }
@@ -101,7 +125,10 @@ func NewReader(r io.Reader) *Reader {
 // NewHTTPReader creates a [Reader] from an HTTP response, first verifying that
 // the Content-Type header is "text/event-stream" as required by §9.2.5
 // ("This event stream format's MIME type is text/event-stream").
-func NewHTTPReader(resp *http.Response) (*Reader, error) {
+//
+// The optional bufSize argument is forwarded to [NewReader]; see its
+// documentation for details.
+func NewHTTPReader(resp *http.Response, bufSize ...int) (*Reader, error) {
 	if resp == nil {
 		return nil, errors.New("sse: http.Response cannot be nil")
 	}
@@ -115,7 +142,7 @@ func NewHTTPReader(resp *http.Response) (*Reader, error) {
 		return nil, fmt.Errorf("sse: Content-Type must be 'text/event-stream', got %q", contentType)
 	}
 
-	return NewReader(resp.Body), nil
+	return NewReader(resp.Body, bufSize...), nil
 }
 
 // parseLine applies the per-line processing rules from §9.2.6 to a single
@@ -262,24 +289,27 @@ func (r *Reader) buildMessage() (Message, bool) {
 // Per §9.2.6, data accumulated at end-of-stream without a trailing blank line
 // is discarded — the iterator ends without dispatching an incomplete event.
 func (r *Reader) Messages(ctx context.Context) iter.Seq2[Message, error] {
-	scanner, err := newLineScanner(r.r)
 	return func(yield func(Message, error) bool) {
-		if err != nil {
-			yield(Message{}, err)
-			return
+		if r.scanner == nil {
+			scanner, err := newLineScanner(r.r, r.bufSize)
+			if err != nil {
+				yield(Message{}, err)
+				return
+			}
+			r.scanner = scanner
 		}
 
 		for {
-			if err = ctx.Err(); err != nil {
+			if err := ctx.Err(); err != nil {
 				yield(Message{}, err)
 				return
 			}
 
-			if !scanner.Scan() {
+			if !r.scanner.Scan() {
 				break
 			}
 
-			line := scanner.Text()
+			line := r.scanner.Text()
 
 			if len(line) == 0 {
 				// Blank line: attempt to dispatch the current event (§9.2.6).
@@ -295,7 +325,7 @@ func (r *Reader) Messages(ctx context.Context) iter.Seq2[Message, error] {
 			r.parseLine(line)
 		}
 
-		if err = scanner.Err(); err != nil {
+		if err := r.scanner.Err(); err != nil {
 			yield(Message{}, err)
 		}
 	}

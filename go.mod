@@ -1,3 +1,3 @@
 module github.com/Tangerg/sse
 
-go 1.25.0
+go 1.23.0

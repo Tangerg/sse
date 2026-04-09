@@ -92,11 +92,19 @@
 //
 //	resp.Body.Close()
 //
+// Both [NewHTTPReader] and [NewReader] accept an optional buffer-size argument
+// (in bytes) that raises the per-line limit above the default 64 KiB. Pass a
+// larger value when the stream may carry payloads that exceed that limit in a
+// single data field (e.g. large JSON objects):
+//
+//	sr, err := sse.NewHTTPReader(resp, 256*1024) // 256 KiB per line
+//
 // For non-HTTP sources use [NewReader], which panics if r is nil. No I/O is
-// performed during construction; the scanner is initialised on the first call
-// to [Reader.Messages]:
+// performed during construction; the scanner is initialised lazily on the
+// first call to [Reader.Messages]:
 //
 //	sr := sse.NewReader(r)
+//	sr := sse.NewReader(r, 256*1024) // with custom buffer size
 //
 // # Heartbeats (§9.2.7)
 //
