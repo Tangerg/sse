@@ -84,6 +84,14 @@
 //	    fmt.Println(msg.Event, string(msg.Data))
 //	}
 //
+// The error value is non-nil only on context cancellation or an I/O error;
+// normal end-of-stream is not reported as an error — the loop simply ends.
+//
+// Context cancellation is cooperative (checked between scans). To unblock a
+// scan waiting on a stalled connection, close the underlying reader:
+//
+//	resp.Body.Close()
+//
 // For non-HTTP sources use [NewReader]. Both constructors accept an optional
 // buffer-size argument (in bytes) that overrides the default 64 KiB per-line
 // scanner limit:
@@ -93,7 +101,9 @@
 // # Heartbeats (§9.2.7)
 //
 // Proxy servers may drop idle HTTP connections after a short timeout.
-// The spec recommends sending a comment line roughly every 15 seconds:
+// The spec recommends sending a comment line roughly every 15 seconds.
+// An empty string is a valid comment and produces the minimal wire frame
+// ":\n\n" (bare colon line followed by a blank line):
 //
 //	sw.Comment(ctx, "")
 package sse

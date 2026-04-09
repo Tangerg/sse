@@ -216,10 +216,10 @@ func TestWriterComment(t *testing.T) {
 		}
 	})
 
-	t.Run("empty comment produces no comment line", func(t *testing.T) {
+	t.Run("empty comment writes bare colon line", func(t *testing.T) {
 		got := writeComment(t, "")
-		if strings.Contains(got, ":") {
-			t.Errorf("empty comment should produce no output, got %q", got)
+		if got != ":\n\n" {
+			t.Errorf("got %q, want %q", got, ":\n\n")
 		}
 	})
 }

@@ -182,12 +182,16 @@ func (b *fieldBuf) writeRetry(retry time.Duration) {
 }
 
 // writeComment writes an SSE comment line (§9.2.5: "comment = colon *any-char
-// end-of-line"). An empty comment string is omitted.
+// end-of-line"). An empty comment writes a bare colon line (":\n") so that
+// sw.Comment(ctx, "") is a valid spec-compliant heartbeat; a non-empty comment
+// adds a space separator (": value\n").
 func (b *fieldBuf) writeComment(comment string) {
-	if len(comment) == 0 {
-		return
+	b.WriteString(colon)
+	if comment != "" {
+		b.WriteString(space)
+		b.WriteString(newlineStripper.Replace(comment))
 	}
-	b.write("", comment)
+	b.WriteString(lf)
 }
 
 // Message encodes msg as a complete SSE event frame and writes it atomically
@@ -230,12 +234,14 @@ func (w *Writer) Message(ctx context.Context, msg Message) error {
 //
 // Comment lines are ignored by the receiver and never dispatch an event.
 // Per §9.2.7, sending a comment roughly every 15 seconds prevents idle
-// proxy servers from closing the connection:
+// proxy servers from closing the connection. An empty string is valid and
+// sufficient — it writes a bare colon line with no text (":\n"), which
+// conforming receivers treat as a comment:
 //
 //	sw.Comment(ctx, "")
 //
-// The frame is terminated with a blank line. An empty comment string produces
-// no output.
+// The frame is terminated with a blank line, so the wire representation of
+// an empty comment is ":\n\n".
 //
 // Returns ctx.Err() immediately if the context is already done.
 func (w *Writer) Comment(ctx context.Context, comment string) error {
