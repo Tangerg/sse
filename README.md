@@ -100,16 +100,6 @@ for msg, err := range sr.Messages(ctx) {
 }
 ```
 
-### Large payloads — custom scanner buffer
-
-Both `NewReader` and `NewHTTPReader` accept an optional byte limit that
-overrides the default 64 KiB per-line scanner cap:
-
-```go
-sr := sse.NewReader(r, 1<<20)              // 1 MiB
-sr, err := sse.NewHTTPReader(resp, 1<<20)  // 1 MiB
-```
-
 ### JSON data
 
 `Message.Data` is `[]byte`, so pass the output of `json.Marshal` directly:
@@ -165,8 +155,8 @@ type Message struct {
 
 | Constructor / Method | Description |
 |---|---|
-| `NewReader(r io.Reader, bufSize ...int) *Reader` | Reader for any `io.Reader`. Panics if r is nil. Optional `bufSize` overrides the 64 KiB scanner limit. No I/O on construction; scanner is initialised lazily. |
-| `NewHTTPReader(resp *http.Response, bufSize ...int) (*Reader, error)` | Reader from an HTTP response; validates `Content-Type: text/event-stream`. |
+| `NewReader(r io.Reader) *Reader` | Reader for any `io.Reader`. Panics if r is nil. No I/O on construction. |
+| `NewHTTPReader(resp *http.Response) (*Reader, error)` | Reader from an HTTP response; validates `Content-Type: text/event-stream`. |
 | `(*Reader).Messages(ctx context.Context) iter.Seq2[Message, error]` | Iterator over all dispatched events. Normal end-of-stream yields no error. Non-nil error means context cancellation or I/O failure. To cancel a blocked read, close the underlying reader. |
 
 ## Spec compliance
