@@ -3,6 +3,7 @@ package sse
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -37,7 +38,9 @@ func stripBOM(r io.Reader) (io.Reader, error) {
 
 // newLineScanner wraps r in a bufio.Scanner configured to split on SSE line
 // endings (CR, LF, or CRLF) after stripping a leading BOM.
-func newLineScanner(r io.Reader) (*bufio.Scanner, error) {
+// If bufSize > 0, the scanner's token buffer is set to that size; otherwise
+// the default 64 KiB limit is used.
+func newLineScanner(r io.Reader, bufSize int) (*bufio.Scanner, error) {
 	stripped, err := stripBOM(r)
 	if err != nil {
 		return nil, err
@@ -45,6 +48,10 @@ func newLineScanner(r io.Reader) (*bufio.Scanner, error) {
 
 	scanner := bufio.NewScanner(stripped)
 	scanner.Split(splitLine)
+
+	if bufSize > 0 {
+		scanner.Buffer(make([]byte, bufSize), bufSize)
+	}
 
 	return scanner, nil
 }
@@ -61,12 +68,19 @@ type Reader struct {
 }
 
 // NewReader creates a Reader that parses SSE events from r.
-func NewReader(r io.Reader) (*Reader, error) {
+// The optional bufSize argument sets the maximum SSE line length the scanner
+// can handle; omit it (or pass 0) to use the default 64 KiB limit.
+func NewReader(r io.Reader, bufSize ...int) (*Reader, error) {
 	if r == nil {
 		return nil, errors.New("sse: reader cannot be nil")
 	}
 
-	scanner, err := newLineScanner(r)
+	size := 0
+	if len(bufSize) > 0 {
+		size = bufSize[0]
+	}
+
+	scanner, err := newLineScanner(r, size)
 	if err != nil {
 		return nil, err
 	}
@@ -79,7 +93,8 @@ func NewReader(r io.Reader) (*Reader, error) {
 
 // NewHTTPReader creates a Reader from an HTTP response, validating that the
 // Content-Type header is text/event-stream.
-func NewHTTPReader(resp *http.Response) (*Reader, error) {
+// The optional bufSize argument is forwarded to NewReader.
+func NewHTTPReader(resp *http.Response, bufSize ...int) (*Reader, error) {
 	if resp == nil {
 		return nil, errors.New("sse: http.Response cannot be nil")
 	}
@@ -93,7 +108,7 @@ func NewHTTPReader(resp *http.Response) (*Reader, error) {
 		return nil, fmt.Errorf("sse: Content-Type must be 'text/event-stream', got %q", contentType)
 	}
 
-	return NewReader(resp.Body)
+	return NewReader(resp.Body, bufSize...)
 }
 
 // parseLine processes a single non-empty SSE line and updates the reader state.
@@ -178,11 +193,22 @@ func (r *Reader) buildMessage() (Message, bool) {
 }
 
 // Messages returns an iterator over all SSE messages in the stream.
-// Scanner errors are surfaced as the error value of the final iteration;
-// the iterator stops immediately after yielding the error.
-func (r *Reader) Messages() iter.Seq2[Message, error] {
+// The iterator checks ctx before every scan; if the context is cancelled it
+// yields the context error and returns. Scanner errors are surfaced as the
+// error value of the final iteration; the iterator stops immediately after
+// yielding the error.
+func (r *Reader) Messages(ctx context.Context) iter.Seq2[Message, error] {
 	return func(yield func(Message, error) bool) {
-		for r.scanner.Scan() {
+		for {
+			if err := ctx.Err(); err != nil {
+				yield(Message{}, err)
+				return
+			}
+
+			if !r.scanner.Scan() {
+				break
+			}
+
 			line := r.scanner.Text()
 
 			if len(line) == 0 {

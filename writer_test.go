@@ -2,6 +2,7 @@ package sse
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -100,7 +101,7 @@ func writeMessage(t *testing.T, msg Message) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := w.Message(msg); err != nil {
+	if err := w.Message(context.Background(), msg); err != nil {
 		t.Fatal(err)
 	}
 	return buf.String()
@@ -114,7 +115,7 @@ func writeComment(t *testing.T, comment string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := w.Comment(comment); err != nil {
+	if err := w.Comment(context.Background(), comment); err != nil {
 		t.Fatal(err)
 	}
 	return buf.String()
@@ -259,7 +260,7 @@ func TestRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := w.Message(tt.msg); err != nil {
+			if err := w.Message(context.Background(), tt.msg); err != nil {
 				t.Fatal(err)
 			}
 
@@ -269,7 +270,7 @@ func TestRoundTrip(t *testing.T) {
 				t.Fatal(err)
 			}
 			var msgs []Message
-			for msg, err := range r.Messages() {
+			for msg, err := range r.Messages(context.Background()) {
 				if err != nil {
 					t.Fatal(err)
 				}

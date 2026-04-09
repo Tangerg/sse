@@ -1,6 +1,7 @@
 package sse_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -44,7 +45,7 @@ func connect(t *testing.T, srv *httptest.Server) *sse.Reader {
 func collectAll(t *testing.T, r *sse.Reader) []sse.Message {
 	t.Helper()
 	var msgs []sse.Message
-	for msg, err := range r.Messages() {
+	for msg, err := range r.Messages(context.Background()) {
 		if err != nil {
 			t.Fatalf("Messages: %v", err)
 		}
@@ -55,7 +56,7 @@ func collectAll(t *testing.T, r *sse.Reader) []sse.Message {
 
 func TestE2E_SingleMessage(t *testing.T) {
 	srv := serve(t, func(w *sse.Writer) {
-		w.Message(sse.Message{
+		w.Message(context.Background(), sse.Message{
 			ID:    "1",
 			Event: "greet",
 			Data:  []byte("hello"),
@@ -89,7 +90,7 @@ func TestE2E_MultipleMessages(t *testing.T) {
 
 	srv := serve(t, func(w *sse.Writer) {
 		for _, msg := range want {
-			w.Message(msg)
+			w.Message(context.Background(), msg)
 		}
 	})
 	defer srv.Close()
@@ -108,7 +109,7 @@ func TestE2E_MultipleMessages(t *testing.T) {
 
 func TestE2E_AllFields(t *testing.T) {
 	srv := serve(t, func(w *sse.Writer) {
-		w.Message(sse.Message{
+		w.Message(context.Background(), sse.Message{
 			ID:    "42",
 			Event: "update",
 			Data:  []byte("payload"),
@@ -139,7 +140,7 @@ func TestE2E_AllFields(t *testing.T) {
 
 func TestE2E_MultiLineData(t *testing.T) {
 	srv := serve(t, func(w *sse.Writer) {
-		w.Message(sse.Message{Data: []byte("line1\nline2\nline3")})
+		w.Message(context.Background(), sse.Message{Data: []byte("line1\nline2\nline3")})
 	})
 	defer srv.Close()
 
@@ -156,8 +157,8 @@ func TestE2E_MultiLineData(t *testing.T) {
 func TestE2E_HeartbeatComment(t *testing.T) {
 	// Comments must not produce messages on the client side.
 	srv := serve(t, func(w *sse.Writer) {
-		w.Comment("heartbeat")
-		w.Message(sse.Message{Data: []byte("after heartbeat")})
+		w.Comment(context.Background(), "heartbeat")
+		w.Message(context.Background(), sse.Message{Data: []byte("after heartbeat")})
 	})
 	defer srv.Close()
 
@@ -173,8 +174,8 @@ func TestE2E_HeartbeatComment(t *testing.T) {
 
 func TestE2E_IDPersistsAcrossEvents(t *testing.T) {
 	srv := serve(t, func(w *sse.Writer) {
-		w.Message(sse.Message{ID: "7", Data: []byte("first")})
-		w.Message(sse.Message{Data: []byte("second")}) // no id field
+		w.Message(context.Background(), sse.Message{ID: "7", Data: []byte("first")})
+		w.Message(context.Background(), sse.Message{Data: []byte("second")}) // no id field
 	})
 	defer srv.Close()
 
@@ -204,8 +205,8 @@ func TestE2E_EarlyClientStop(t *testing.T) {
 			return
 		}
 		close(started)
-		for i := 0; ; i++ {
-			if err := w.Message(sse.Message{Data: []byte("tick")}); err != nil {
+		for {
+			if err := w.Message(context.Background(), sse.Message{Data: []byte("tick")}); err != nil {
 				return
 			}
 		}
@@ -227,7 +228,7 @@ func TestE2E_EarlyClientStop(t *testing.T) {
 
 	// Read exactly 3 messages then stop.
 	count := 0
-	for _, err := range r.Messages() {
+	for _, err := range r.Messages(context.Background()) {
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -261,7 +262,7 @@ func TestE2E_JSONData(t *testing.T) {
 			if err != nil {
 				return
 			}
-			w.Message(sse.Message{
+			w.Message(context.Background(), sse.Message{
 				ID:    string(rune('1' + i)),
 				Event: "order.updated",
 				Data:  data,
