@@ -195,6 +195,9 @@ func (r *Reader) parseLine(line string) {
 
 	case fieldRetry:
 		// Value must consist solely of ASCII digits; ignore otherwise (§9.2.6).
+		if len(value) == 0 {
+			return
+		}
 		for _, ch := range value {
 			if ch < '0' || ch > '9' {
 				return
@@ -260,12 +263,19 @@ func (r *Reader) buildMessage() (Message, bool) {
 // lines. A blank line that does not produce a message (empty data buffer) is
 // silently skipped.
 //
-// Context cancellation is checked before every scan. If ctx is done the
-// context error is yielded and the iterator returns immediately. This provides
-// a cooperative cancellation point; note that an in-progress [bufio.Scanner.Scan]
-// call is not interrupted — cancellation takes effect at the next iteration.
+// The error value yielded alongside each message follows these rules:
+//   - Normal end-of-stream (EOF) is never reported as an error — the iterator
+//     simply stops yielding.
+//   - Context cancellation or deadline expiry yields ctx.Err() as the final
+//     value and the iterator returns immediately.
+//   - Any I/O or scanner error is yielded as the final value and the iterator
+//     stops.
 //
-// Any scanner error is yielded as the final value and the iterator stops.
+// Context cancellation is cooperative: it is checked before every scan, so
+// an in-progress [bufio.Scanner.Scan] call is not interrupted mid-read.
+// Cancellation takes effect at the next iteration boundary. To unblock a scan
+// that is waiting on a stalled connection, close the underlying [io.Reader]
+// (e.g. resp.Body.Close() for an HTTP response).
 //
 // Per §9.2.6, data accumulated at end-of-stream without a trailing blank line
 // is discarded — the iterator ends without dispatching an incomplete event.

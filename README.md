@@ -32,11 +32,13 @@ func handler(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    sw.Message(r.Context(), sse.Message{
+    if err := sw.Message(r.Context(), sse.Message{
         ID:    "1",
         Event: "update",
         Data:  []byte("hello world"),
-    })
+    }); err != nil {
+        return // client disconnected
+    }
 
     // Send a heartbeat comment every ~15 s to prevent proxy timeouts (§9.2.7).
     sw.Comment(r.Context(), "keep-alive")
@@ -57,11 +59,11 @@ Headers set automatically by `NewHTTPWriter`:
 sw, err := sse.NewWriter(w)
 if err != nil { ... }
 
-sw.Message(ctx, sse.Message{
+if err := sw.Message(ctx, sse.Message{
     Event: "ping",
     Data:  []byte("{}"),
     Retry: 5 * time.Second,
-})
+}); err != nil { ... }
 ```
 
 ### Reading events — HTTP client
@@ -83,6 +85,11 @@ for msg, err := range sr.Messages(ctx) {
     fmt.Printf("event=%s data=%s\n", msg.Event, msg.Data)
 }
 ```
+
+The error value is non-nil only on context cancellation or an I/O error; normal
+end-of-stream is not reported as an error. Context cancellation is cooperative
+(checked between scans). To unblock a scan waiting on a stalled connection,
+close `resp.Body`.
 
 ### Reading events — plain `io.Reader`
 
@@ -112,11 +119,11 @@ sr, err := sse.NewHTTPReader(resp, 1<<20)  // 1 MiB
 ```go
 // Server — writing
 payload, _ := json.Marshal(OrderEvent{OrderID: "ord_123", Status: "shipped"})
-sw.Message(ctx, sse.Message{
+if err := sw.Message(ctx, sse.Message{
     ID:    "1",
     Event: "order.updated",
     Data:  payload,
-})
+}); err != nil { ... }
 
 // Client — reading
 for msg, err := range sr.Messages(ctx) {
@@ -162,7 +169,7 @@ type Message struct {
 |---|---|
 | `NewReader(r io.Reader, bufSize ...int) (*Reader, error)` | Reader for any `io.Reader`. Optional `bufSize` overrides the 64 KiB scanner limit. |
 | `NewHTTPReader(resp *http.Response, bufSize ...int) (*Reader, error)` | Reader from an HTTP response; validates `Content-Type: text/event-stream`. |
-| `(*Reader).Messages(ctx context.Context) iter.Seq2[Message, error]` | Iterator over all dispatched events. Stops on context cancellation or scanner error. |
+| `(*Reader).Messages(ctx context.Context) iter.Seq2[Message, error]` | Iterator over all dispatched events. Normal end-of-stream yields no error. Non-nil error means context cancellation or I/O failure. To cancel a blocked read, close the underlying reader. |
 
 ## Spec compliance
 
