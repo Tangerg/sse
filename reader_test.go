@@ -144,6 +144,85 @@ func TestNewHTTPReader(t *testing.T) {
 }
 
 
+func TestNewReaderBufSize(t *testing.T) {
+	// Build a data payload that exceeds the default 64 KiB scanner buffer.
+	large := strings.Repeat("x", 128*1024)
+	input := "data: " + large + "\n\n"
+
+	t.Run("default bufSize rejects oversized line", func(t *testing.T) {
+		r := NewReader(strings.NewReader(input))
+		var gotErr error
+		for _, err := range r.Messages(context.Background()) {
+			gotErr = err
+		}
+		if gotErr == nil {
+			t.Error("expected scanner error for line exceeding 64 KiB, got nil")
+		}
+	})
+
+	t.Run("custom bufSize accepts large line", func(t *testing.T) {
+		r := NewReader(strings.NewReader(input), 256*1024)
+		var msgs []Message
+		for msg, err := range r.Messages(context.Background()) {
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			msgs = append(msgs, msg)
+		}
+		if len(msgs) != 1 {
+			t.Fatalf("got %d messages, want 1", len(msgs))
+		}
+		if string(msgs[0].Data) != large {
+			t.Errorf("data length = %d, want %d", len(msgs[0].Data), len(large))
+		}
+	})
+
+	t.Run("zero bufSize uses default", func(t *testing.T) {
+		small := "hello"
+		r := NewReader(strings.NewReader("data: "+small+"\n\n"), 0)
+		var msgs []Message
+		for msg, err := range r.Messages(context.Background()) {
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			msgs = append(msgs, msg)
+		}
+		if len(msgs) != 1 || string(msgs[0].Data) != small {
+			t.Errorf("unexpected messages: %v", msgs)
+		}
+	})
+}
+
+func TestReaderMessagesCalledTwice(t *testing.T) {
+	// Calling Messages a second time on the same Reader must reuse the existing
+	// scanner and not reset shared state (lastEventID, dataBuf, eventType).
+	// After the stream is exhausted the second call should yield nothing.
+	r := NewReader(strings.NewReader("id: 1\ndata: hello\n\n"))
+
+	var first []Message
+	for msg, err := range r.Messages(context.Background()) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		first = append(first, msg)
+	}
+	if len(first) != 1 {
+		t.Fatalf("first call: got %d messages, want 1", len(first))
+	}
+
+	// Second call: stream is exhausted; must return immediately without error.
+	var second []Message
+	for msg, err := range r.Messages(context.Background()) {
+		if err != nil {
+			t.Fatalf("second call: unexpected error: %v", err)
+		}
+		second = append(second, msg)
+	}
+	if len(second) != 0 {
+		t.Errorf("second call: got %d messages, want 0", len(second))
+	}
+}
+
 func TestReaderMessages(t *testing.T) {
 	t.Run("basic data field", func(t *testing.T) {
 		msgs, err := collectMessages("data: hello\n\n")
