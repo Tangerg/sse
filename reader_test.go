@@ -75,8 +75,8 @@ func TestNewReader(t *testing.T) {
 		}
 	})
 
-	t.Run("custom bufSize applied", func(t *testing.T) {
-		r := NewReader(strings.NewReader("data: hello\n\n"), 1024*1024)
+	t.Run("reads messages", func(t *testing.T) {
+		r := NewReader(strings.NewReader("data: hello\n\n"))
 		var msgs []Message
 		for msg, err := range r.Messages(context.Background()) {
 			if err != nil {
@@ -142,6 +142,7 @@ func TestNewHTTPReader(t *testing.T) {
 		}
 	})
 }
+
 
 func TestReaderMessages(t *testing.T) {
 	t.Run("basic data field", func(t *testing.T) {
