@@ -11,10 +11,7 @@ import (
 
 // collectMessages is a helper that reads all messages from a raw SSE string.
 func collectMessages(input string) ([]Message, error) {
-	r, err := NewReader(strings.NewReader(input))
-	if err != nil {
-		return nil, err
-	}
+	r := NewReader(strings.NewReader(input))
 
 	var msgs []Message
 	for msg, err := range r.Messages(context.Background()) {
@@ -62,28 +59,24 @@ func TestStripBOM(t *testing.T) {
 }
 
 func TestNewReader(t *testing.T) {
-	t.Run("nil reader", func(t *testing.T) {
-		_, err := NewReader(nil)
-		if err == nil {
-			t.Error("expected error, got nil")
-		}
+	t.Run("nil reader panics", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("expected panic, got none")
+			}
+		}()
+		NewReader(nil)
 	})
 
 	t.Run("valid reader", func(t *testing.T) {
-		r, err := NewReader(strings.NewReader(""))
-		if err != nil {
-			t.Fatal(err)
-		}
+		r := NewReader(strings.NewReader(""))
 		if r == nil {
 			t.Error("expected non-nil Reader")
 		}
 	})
 
 	t.Run("custom bufSize applied", func(t *testing.T) {
-		r, err := NewReader(strings.NewReader("data: hello\n\n"), 1024*1024)
-		if err != nil {
-			t.Fatal(err)
-		}
+		r := NewReader(strings.NewReader("data: hello\n\n"), 1024*1024)
 		var msgs []Message
 		for msg, err := range r.Messages(context.Background()) {
 			if err != nil {

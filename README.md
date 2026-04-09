@@ -56,8 +56,7 @@ Headers set automatically by `NewHTTPWriter`:
 ### Writing events — plain `io.Writer`
 
 ```go
-sw, err := sse.NewWriter(w)
-if err != nil { ... }
+sw := sse.NewWriter(w)
 
 if err := sw.Message(ctx, sse.Message{
     Event: "ping",
@@ -94,8 +93,7 @@ close `resp.Body`.
 ### Reading events — plain `io.Reader`
 
 ```go
-sr, err := sse.NewReader(r)
-if err != nil { ... }
+sr := sse.NewReader(r)
 
 for msg, err := range sr.Messages(ctx) {
     ...
@@ -108,7 +106,7 @@ Both `NewReader` and `NewHTTPReader` accept an optional byte limit that
 overrides the default 64 KiB per-line scanner cap:
 
 ```go
-sr, err := sse.NewReader(r, 1<<20)         // 1 MiB
+sr := sse.NewReader(r, 1<<20)              // 1 MiB
 sr, err := sse.NewHTTPReader(resp, 1<<20)  // 1 MiB
 ```
 
@@ -158,7 +156,7 @@ type Message struct {
 
 | Constructor / Method | Description |
 |---|---|
-| `NewWriter(w io.Writer) (*Writer, error)` | Writer for any `io.Writer`. |
+| `NewWriter(w io.Writer) *Writer` | Writer for any `io.Writer`. Panics if w is nil. |
 | `NewHTTPWriter(rw http.ResponseWriter) (*Writer, error)` | Writer for HTTP; sets SSE headers and flushes after each write. |
 | `(*Writer).Message(ctx context.Context, msg Message) error` | Encode and write one SSE event frame. Returns immediately if ctx is done. |
 | `(*Writer).Comment(ctx context.Context, comment string) error` | Write an SSE comment line. Ignored by receivers but keeps the connection alive through proxies (§9.2.7). Returns immediately if ctx is done. |
@@ -167,7 +165,7 @@ type Message struct {
 
 | Constructor / Method | Description |
 |---|---|
-| `NewReader(r io.Reader, bufSize ...int) (*Reader, error)` | Reader for any `io.Reader`. Optional `bufSize` overrides the 64 KiB scanner limit. |
+| `NewReader(r io.Reader, bufSize ...int) *Reader` | Reader for any `io.Reader`. Panics if r is nil. Optional `bufSize` overrides the 64 KiB scanner limit. No I/O on construction; scanner is initialised lazily. |
 | `NewHTTPReader(resp *http.Response, bufSize ...int) (*Reader, error)` | Reader from an HTTP response; validates `Content-Type: text/event-stream`. |
 | `(*Reader).Messages(ctx context.Context) iter.Seq2[Message, error]` | Iterator over all dispatched events. Normal end-of-stream yields no error. Non-nil error means context cancellation or I/O failure. To cancel a blocked read, close the underlying reader. |
 

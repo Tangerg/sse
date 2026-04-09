@@ -45,18 +45,17 @@ func TestSetSSEHeaders(t *testing.T) {
 }
 
 func TestNewWriter(t *testing.T) {
-	t.Run("nil writer returns error", func(t *testing.T) {
-		_, err := NewWriter(nil)
-		if err == nil {
-			t.Error("expected error, got nil")
-		}
+	t.Run("nil writer panics", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("expected panic, got none")
+			}
+		}()
+		NewWriter(nil)
 	})
 
 	t.Run("valid writer", func(t *testing.T) {
-		w, err := NewWriter(&bytes.Buffer{})
-		if err != nil {
-			t.Fatal(err)
-		}
+		w := NewWriter(&bytes.Buffer{})
 		if w == nil {
 			t.Error("expected non-nil Writer")
 		}
@@ -97,10 +96,7 @@ func TestNewHTTPWriter(t *testing.T) {
 func writeMessage(t *testing.T, msg Message) string {
 	t.Helper()
 	var buf bytes.Buffer
-	w, err := NewWriter(&buf)
-	if err != nil {
-		t.Fatal(err)
-	}
+	w := NewWriter(&buf)
 	if err := w.Message(context.Background(), msg); err != nil {
 		t.Fatal(err)
 	}
@@ -111,10 +107,7 @@ func writeMessage(t *testing.T, msg Message) string {
 func writeComment(t *testing.T, comment string) string {
 	t.Helper()
 	var buf bytes.Buffer
-	w, err := NewWriter(&buf)
-	if err != nil {
-		t.Fatal(err)
-	}
+	w := NewWriter(&buf)
 	if err := w.Comment(context.Background(), comment); err != nil {
 		t.Fatal(err)
 	}
@@ -256,19 +249,13 @@ func TestRoundTrip(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Write.
 			var buf bytes.Buffer
-			w, err := NewWriter(&buf)
-			if err != nil {
-				t.Fatal(err)
-			}
+			w := NewWriter(&buf)
 			if err := w.Message(context.Background(), tt.msg); err != nil {
 				t.Fatal(err)
 			}
 
 			// Read back.
-			r, err := NewReader(strings.NewReader(buf.String()))
-			if err != nil {
-				t.Fatal(err)
-			}
+			r := NewReader(strings.NewReader(buf.String()))
 			var msgs []Message
 			for msg, err := range r.Messages(context.Background()) {
 				if err != nil {
