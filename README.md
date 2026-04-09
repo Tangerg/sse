@@ -3,9 +3,13 @@
 A minimal, spec-compliant Go library for reading and writing
 [Server-Sent Events (SSE)](https://html.spec.whatwg.org/multipage/server-sent-events.html).
 
-Implements the WHATWG HTML Living Standard §9.2 in full:
-BOM stripping, all three line endings (LF / CR / CRLF), all four field names
-(`data`, `event`, `id`, `retry`), and correct blank-line dispatch semantics.
+Implements the WHATWG HTML Living Standard §9.2 in full — BOM stripping,
+all three line endings (LF / CR / CRLF), all four field names (`data`, `event`,
+`id`, `retry`), and correct blank-line dispatch semantics.
+
+## Requirements
+
+Go 1.23 or later (uses `iter.Seq2` from the standard library).
 
 ## Installation
 
@@ -15,62 +19,64 @@ go get github.com/Tangerg/sse
 
 ## Usage
 
-### Writing events (HTTP server)
+### Writing events — HTTP server
+
+`NewHTTPWriter` sets the required response headers and flushes each event to
+the client immediately:
 
 ```go
 func handler(w http.ResponseWriter, r *http.Request) {
-    writer, err := sse.NewHTTPWriter(w)
+    sw, err := sse.NewHTTPWriter(w)
     if err != nil {
         http.Error(w, err.Error(), http.StatusInternalServerError)
         return
     }
 
-    // Send a named event with data.
-    writer.Message(sse.Message{
+    sw.Message(r.Context(), sse.Message{
         ID:    "1",
         Event: "update",
         Data:  []byte("hello world"),
     })
 
-    // Send a heartbeat comment every ~15 s to prevent proxy timeouts.
-    // SSE comments (lines starting with ':') are ignored by the client
-    // but keep the connection alive through intermediary proxies.
-    writer.Comment("heartbeat")
+    // Send a heartbeat comment every ~15 s to prevent proxy timeouts (§9.2.7).
+    sw.Comment(r.Context(), "keep-alive")
 }
 ```
 
-`NewHTTPWriter` sets the required response headers automatically:
+Headers set automatically by `NewHTTPWriter`:
 
 | Header          | Value                              |
 |-----------------|------------------------------------|
 | `Content-Type`  | `text/event-stream; charset=utf-8` |
 | `Connection`    | `keep-alive`                       |
-| `Cache-Control` | `no-cache` (if not already set)    |
+| `Cache-Control` | `no-cache` *(if not already set)*  |
 
-### Writing events (plain io.Writer)
+### Writing events — plain `io.Writer`
 
 ```go
-writer, err := sse.NewWriter(w)
+sw, err := sse.NewWriter(w)
 if err != nil { ... }
 
-writer.Message(sse.Message{
+sw.Message(ctx, sse.Message{
     Event: "ping",
     Data:  []byte("{}"),
     Retry: 5 * time.Second,
 })
 ```
 
-### Reading events (HTTP client)
+### Reading events — HTTP client
+
+`NewHTTPReader` validates the `Content-Type` header before parsing:
 
 ```go
 resp, err := http.Get("https://example.com/events")
 if err != nil { ... }
 defer resp.Body.Close()
 
-reader, err := sse.NewHTTPReader(resp)
+sr, err := sse.NewHTTPReader(resp)
 if err != nil { ... }
 
-for msg, err := range reader.Messages() {
+for msg, err := range sr.Messages(ctx) {
     if err != nil {
         log.Fatal(err)
     }
@@ -78,66 +84,46 @@ for msg, err := range reader.Messages() {
 }
 ```
 
-### Writing JSON data
+### Reading events — plain `io.Reader`
+
+```go
+sr, err := sse.NewReader(r)
+if err != nil { ... }
+
+for msg, err := range sr.Messages(ctx) {
+    ...
+}
+```
+
+### Large payloads — custom scanner buffer
+
+Both `NewReader` and `NewHTTPReader` accept an optional byte limit that
+overrides the default 64 KiB per-line scanner cap:
+
+```go
+sr, err := sse.NewReader(r, 1<<20)         // 1 MiB
+sr, err := sse.NewHTTPReader(resp, 1<<20)  // 1 MiB
+```
+
+### JSON data
 
 `Message.Data` is `[]byte`, so pass the output of `json.Marshal` directly:
 
 ```go
-type OrderEvent struct {
-    OrderID string  `json:"order_id"`
-    Status  string  `json:"status"`
-    Total   float64 `json:"total"`
-}
+// Server — writing
+payload, _ := json.Marshal(OrderEvent{OrderID: "ord_123", Status: "shipped"})
+sw.Message(ctx, sse.Message{
+    ID:    "1",
+    Event: "order.updated",
+    Data:  payload,
+})
 
-func handler(w http.ResponseWriter, r *http.Request) {
-    writer, err := sse.NewHTTPWriter(w)
-    if err != nil {
-        http.Error(w, err.Error(), http.StatusInternalServerError)
-        return
-    }
-
-    payload, err := json.Marshal(OrderEvent{
-        OrderID: "ord_123",
-        Status:  "shipped",
-        Total:   59.90,
-    })
-    if err != nil {
-        return
-    }
-
-    writer.Message(sse.Message{
-        ID:    "1",
-        Event: "order.updated",
-        Data:  payload,
-    })
-}
-```
-
-On the client side, unmarshal `msg.Data` the same way:
-
-```go
-for msg, err := range reader.Messages() {
-    if err != nil {
-        log.Fatal(err)
-    }
-
+// Client — reading
+for msg, err := range sr.Messages(ctx) {
+    if err != nil { log.Fatal(err) }
     var evt OrderEvent
-    if err := json.Unmarshal(msg.Data, &evt); err != nil {
-        log.Fatal(err)
-    }
-
+    if err := json.Unmarshal(msg.Data, &evt); err != nil { log.Fatal(err) }
     fmt.Printf("order %s is now %s\n", evt.OrderID, evt.Status)
-}
-```
-
-### Reading events (plain io.Reader)
-
-```go
-reader, err := sse.NewReader(r)
-if err != nil { ... }
-
-for msg, err := range reader.Messages() {
-    ...
 }
 ```
 
@@ -154,42 +140,47 @@ type Message struct {
 }
 ```
 
-| Field   | SSE field | Notes                                          |
-|---------|-----------|------------------------------------------------|
-| `ID`    | `id`      | Omitted if empty. Ignored if it contains NUL. |
-| `Event` | `event`   | Defaults to `"message"` on read when absent.  |
-| `Data`  | `data`    | Multi-line values are split automatically.     |
-| `Retry` | `retry`   | Omitted if ≤ 0.                               |
+| Field   | Wire field | Notes |
+|---------|-----------|-------|
+| `ID`    | `id`      | Persists across events until the server resets it. Values containing U+0000 are ignored on receipt; an empty ID omits the field on write. |
+| `Event` | `event`   | Defaults to `"message"` when absent from the stream. An empty value omits the field on write. |
+| `Data`  | `data`    | Multi-line values are split into one `data:` line each. Events with no data are discarded (§9.2.6). |
+| `Retry` | `retry`   | Reconnection-time hint, converted to/from milliseconds. Zero or negative omits the field on write. |
 
 ### `Writer`
 
-| Method                           | Description                          |
-|----------------------------------|--------------------------------------|
-| `NewWriter(w io.Writer)`         | Create a writer for any `io.Writer`. |
-| `NewHTTPWriter(rw http.ResponseWriter)` | Create a writer for HTTP, sets SSE headers and flushes after each write. |
-| `(*Writer).Message(msg Message)` | Write one SSE event frame.           |
-| `(*Writer).Comment(comment string)` | Write an SSE comment line. Ignored by clients but keeps the connection alive through proxies — use for heartbeats. |
+| Constructor / Method | Description |
+|---|---|
+| `NewWriter(w io.Writer) (*Writer, error)` | Writer for any `io.Writer`. |
+| `NewHTTPWriter(rw http.ResponseWriter) (*Writer, error)` | Writer for HTTP; sets SSE headers and flushes after each write. |
+| `(*Writer).Message(ctx context.Context, msg Message) error` | Encode and write one SSE event frame. Returns immediately if ctx is done. |
+| `(*Writer).Comment(ctx context.Context, comment string) error` | Write an SSE comment line. Ignored by receivers but keeps the connection alive through proxies (§9.2.7). Returns immediately if ctx is done. |
 
 ### `Reader`
 
-| Method                                    | Description                                   |
-|-------------------------------------------|-----------------------------------------------|
-| `NewReader(r io.Reader)`                  | Create a reader for any `io.Reader`.          |
-| `NewHTTPReader(resp *http.Response)`      | Create a reader from an HTTP response; validates `Content-Type`. |
-| `(*Reader).Messages() iter.Seq2[Message, error]` | Iterate over all dispatched events.   |
+| Constructor / Method | Description |
+|---|---|
+| `NewReader(r io.Reader, bufSize ...int) (*Reader, error)` | Reader for any `io.Reader`. Optional `bufSize` overrides the 64 KiB scanner limit. |
+| `NewHTTPReader(resp *http.Response, bufSize ...int) (*Reader, error)` | Reader from an HTTP response; validates `Content-Type: text/event-stream`. |
+| `(*Reader).Messages(ctx context.Context) iter.Seq2[Message, error]` | Iterator over all dispatched events. Stops on context cancellation or scanner error. |
 
 ## Spec compliance
 
-Follows the WHATWG HTML Living Standard §9.2:
+Implements WHATWG HTML Living Standard §9.2:
 <https://html.spec.whatwg.org/multipage/server-sent-events.html>
 
-- UTF-8 BOM stripped from the start of the stream
-- All three line endings accepted: LF, CR, CRLF
-- Leading space after `:` stripped from field values
-- `id` fields containing U+0000 are ignored
-- `retry` fields containing non-ASCII-digit characters are ignored
-- Trailing LF removed from the data buffer on dispatch
-- Incomplete final events (no trailing blank line) are discarded
+| Requirement | §9.2 reference |
+|---|---|
+| UTF-8 BOM stripped from stream start | §9.2.6 — "UTF-8 decode algorithm strips one leading BOM" |
+| All three line endings: LF, CR, CRLF | §9.2.5 `end-of-line` production |
+| Single leading space after `:` stripped from field values | §9.2.6 — "If value starts with U+0020 SPACE, remove it" |
+| `id` values containing U+0000 ignored | §9.2.6 — "If the field value does not contain U+0000 NULL…" |
+| `retry` values with non-ASCII-digit characters ignored | §9.2.6 — "If the field value consists of only ASCII digits…" |
+| Trailing LF removed from data buffer on dispatch | §9.2.6 dispatch step 3 |
+| Events with empty data buffer discarded | §9.2.6 dispatch step 2 |
+| Last-event-ID persists across events | §9.2.6 dispatch step 1 — "The buffer does not get reset" |
+| Incomplete final event (no trailing blank line) discarded | §9.2.6 — "any pending data must be discarded" |
+| MIME type `text/event-stream` enforced on read | §9.2.5 |
 
 ## License
 
