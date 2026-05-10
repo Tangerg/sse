@@ -4,30 +4,6 @@ import (
 	"testing"
 )
 
-func TestTrimTrailingCR(t *testing.T) {
-	tests := []struct {
-		name  string
-		input []byte
-		want  string
-	}{
-		{"empty slice", []byte{}, ""},
-		{"no CR", []byte("hello"), "hello"},
-		{"trailing CR removed", []byte("hello\r"), "hello"},
-		{"only CR", []byte("\r"), ""},
-		{"CR not at end is kept", []byte("hel\rlo"), "hel\rlo"},
-		{"LF not removed", []byte("hello\n"), "hello\n"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := trimTrailingCR(tt.input)
-			if string(got) != tt.want {
-				t.Errorf("trimTrailingCR(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestSplitLine(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -57,6 +33,11 @@ func TestSplitLine(t *testing.T) {
 		// EOF with no terminator.
 		{"no terminator atEOF", []byte("hello"), true, 5, "hello"},
 		{"no terminator not atEOF", []byte("hello"), false, 0, ""},
+
+		// Trailing CR ambiguity: at EOF it's a final terminator; otherwise
+		// wait for the next byte to disambiguate against CRLF.
+		{"trailing CR atEOF", []byte("hello\r"), true, 6, "hello"},
+		{"trailing CR not atEOF", []byte("hello\r"), false, 0, ""},
 	}
 
 	for _, tt := range tests {
