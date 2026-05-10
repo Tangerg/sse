@@ -102,13 +102,13 @@ for msg, err := range sr.Messages(ctx) {
 
 ### Large payloads
 
-The scanner's default per-line limit is 64 KiB. Pass an explicit buffer size
-(in bytes) to either constructor when the stream may carry larger payloads in a
-single `data` field (e.g. serialised JSON objects):
+The scanner's default per-line limit is 64 KiB. Use the `Size` constructors
+when the stream may carry larger payloads in a single `data` field (e.g.
+serialised JSON objects):
 
 ```go
-sr, err := sse.NewHTTPReader(resp, 512*1024) // 512 KiB per line
-sr        := sse.NewReader(r,    512*1024)
+sr, err := sse.NewHTTPReaderSize(resp, 512*1024) // 512 KiB per line
+sr        := sse.NewReaderSize(r,    512*1024)
 ```
 
 Lines that exceed the configured limit cause `Messages` to yield a non-nil
@@ -169,8 +169,10 @@ type Message struct {
 
 | Constructor / Method | Description |
 |---|---|
-| `NewReader(r io.Reader, bufSize ...int) *Reader` | Reader for any `io.Reader`. Panics if r is nil. No I/O on construction. Optional `bufSize` overrides the scanner's default 64 KiB per-line limit. |
-| `NewHTTPReader(resp *http.Response, bufSize ...int) (*Reader, error)` | Reader from an HTTP response; validates `Content-Type: text/event-stream`. Optional `bufSize` is forwarded to `NewReader`. |
+| `NewReader(r io.Reader) *Reader` | Reader for any `io.Reader`. Panics if r is nil. No I/O on construction. Uses the scanner's default 64 KiB per-line limit. |
+| `NewReaderSize(r io.Reader, bufSize int) *Reader` | Like `NewReader` but with an explicit per-line buffer size; a zero or negative value falls back to the default. |
+| `NewHTTPReader(resp *http.Response) (*Reader, error)` | Reader from an HTTP response; validates `Content-Type: text/event-stream`. |
+| `NewHTTPReaderSize(resp *http.Response, bufSize int) (*Reader, error)` | Like `NewHTTPReader` but with a custom per-line buffer size. |
 | `(*Reader).Messages(ctx context.Context) iter.Seq2[Message, error]` | Iterator over all dispatched events. The scanner is initialised lazily on the first call and reused on subsequent calls. Normal end-of-stream yields no error. Non-nil error means context cancellation, I/O failure, or a line exceeding the buffer limit. To cancel a blocked read, close the underlying reader. |
 
 ## Spec compliance

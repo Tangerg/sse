@@ -103,8 +103,8 @@ func writeMessage(t *testing.T, msg Message) string {
 	return buf.String()
 }
 
-// writeComment is a helper that encodes comment to a buffer and returns the output.
-func writeComment(t *testing.T, comment string) string {
+// renderComment is a helper that encodes comment to a buffer and returns the output.
+func renderComment(t *testing.T, comment string) string {
 	t.Helper()
 	var buf bytes.Buffer
 	w := NewWriter(&buf)
@@ -196,21 +196,21 @@ func TestWriterMessage(t *testing.T) {
 
 func TestWriterComment(t *testing.T) {
 	t.Run("comment written as colon-prefixed line", func(t *testing.T) {
-		got := writeComment(t, "heartbeat")
+		got := renderComment(t, "heartbeat")
 		if !strings.Contains(got, ": heartbeat\n") {
 			t.Errorf("got %q", got)
 		}
 	})
 
 	t.Run("comment frame ends with blank line", func(t *testing.T) {
-		got := writeComment(t, "ping")
+		got := renderComment(t, "ping")
 		if !strings.HasSuffix(got, "\n\n") {
 			t.Errorf("comment frame must end with blank line, got %q", got)
 		}
 	})
 
 	t.Run("empty comment writes bare colon line", func(t *testing.T) {
-		got := writeComment(t, "")
+		got := renderComment(t, "")
 		if got != ":\n\n" {
 			t.Errorf("got %q, want %q", got, ":\n\n")
 		}

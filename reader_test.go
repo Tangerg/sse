@@ -143,8 +143,7 @@ func TestNewHTTPReader(t *testing.T) {
 	})
 }
 
-
-func TestNewReaderBufSize(t *testing.T) {
+func TestNewReaderSize(t *testing.T) {
 	// Build a data payload that exceeds the default 64 KiB scanner buffer.
 	large := strings.Repeat("x", 128*1024)
 	input := "data: " + large + "\n\n"
@@ -161,7 +160,7 @@ func TestNewReaderBufSize(t *testing.T) {
 	})
 
 	t.Run("custom bufSize accepts large line", func(t *testing.T) {
-		r := NewReader(strings.NewReader(input), 256*1024)
+		r := NewReaderSize(strings.NewReader(input), 256*1024)
 		var msgs []Message
 		for msg, err := range r.Messages(context.Background()) {
 			if err != nil {
@@ -177,9 +176,9 @@ func TestNewReaderBufSize(t *testing.T) {
 		}
 	})
 
-	t.Run("zero bufSize uses default", func(t *testing.T) {
+	t.Run("zero bufSize falls back to default", func(t *testing.T) {
 		small := "hello"
-		r := NewReader(strings.NewReader("data: "+small+"\n\n"), 0)
+		r := NewReaderSize(strings.NewReader("data: "+small+"\n\n"), 0)
 		var msgs []Message
 		for msg, err := range r.Messages(context.Background()) {
 			if err != nil {

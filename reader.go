@@ -15,29 +15,22 @@ import (
 )
 
 // stripBOM implements the first step of the UTF-8 decode algorithm required by
-// §9.2.6: "Streams must be decoded using the UTF-8 decode algorithm. The UTF-8
-// decode algorithm strips one leading UTF-8 Byte Order Mark (BOM), if any."
+// §9.2.6: a single leading UTF-8 Byte Order Mark is dropped if present.
 //
-// It peeks at the first rune via a [bufio.Reader] and unreads it when it is not
-// a BOM, so the returned reader always starts at the first non-BOM byte.
+// The implementation reads up to 3 bytes — the length of the UTF-8 BOM — and
+// either drops them on a match or prepends them back via [io.MultiReader] on
+// a miss. A short read (stream shorter than 3 bytes) is treated as a non-BOM
+// stream; only a real I/O error is propagated.
 func stripBOM(r io.Reader) (io.Reader, error) {
-	br := bufio.NewReader(r)
-
-	char, _, err := br.ReadRune()
-	if err == io.EOF {
-		return br, nil
-	}
-	if err != nil {
+	var head [3]byte
+	n, err := io.ReadFull(r, head[:])
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 		return nil, fmt.Errorf("sse: reading BOM: %w", err)
 	}
-
-	if string(char) != bom {
-		if err = br.UnreadRune(); err != nil {
-			return nil, fmt.Errorf("sse: unreading BOM character: %w", err)
-		}
+	if n == 3 && string(head[:]) == bom {
+		return r, nil
 	}
-
-	return br, nil
+	return io.MultiReader(bytes.NewReader(head[:n]), r), nil
 }
 
 // newLineScanner strips the BOM from r (§9.2.6) and wraps the result in a
@@ -66,154 +59,130 @@ func newLineScanner(r io.Reader, bufSize int) (*bufio.Scanner, error) {
 // Reader parses an SSE event stream according to §9.2.6, yielding one
 // [Message] per blank-line dispatch boundary.
 //
-// The parser maintains three mutable buffers that survive across dispatch
-// boundaries, matching the state machine described by the spec:
-//
-//   - lastEventID – the last-event-ID buffer; updated by "id" fields and never
-//     reset, so its value carries forward to every subsequent event (§9.2.6
-//     dispatch step 1).
-//   - dataBuf     – the data buffer; accumulated from "data" fields, cleared
-//     on each dispatch (§9.2.6 dispatch steps 2–3, 7).
-//   - eventType   – the event-type buffer; set by "event" fields, cleared on
-//     each dispatch (§9.2.6 dispatch steps 4, 7).
-//   - retry       – the reconnection-time hint from the "retry" field, carried
-//     in the Message and cleared after each dispatch.
+// The struct fields below back the spec's dispatch state machine. lastEventID
+// persists across events (the spec never resets it); dataBuf, eventType, and
+// retry are cleared on each dispatch.
 //
 // The scanner is created lazily on the first call to [Reader.Messages] and
-// stored as a field. Subsequent calls to [Reader.Messages] reuse the same
-// scanner so that state is not inadvertently reset between iterations, and
-// [NewReader] never performs I/O and never returns an error.
+// reused on subsequent calls, so cross-iteration state is preserved.
 type Reader struct {
 	r       io.Reader
 	scanner *bufio.Scanner
 	bufSize int
 
 	lastEventID string
-	dataBuf     *bytes.Buffer
+	dataBuf     bytes.Buffer
 	eventType   string
 	retry       time.Duration
 }
 
-// NewReader creates a [Reader] that parses the SSE event stream from r.
-// Panics if r is nil.
-//
-// The optional bufSize argument overrides the scanner's default 64 KiB token
-// buffer. Pass a larger value when the stream may contain lines exceeding
-// 64 KiB (e.g. large JSON payloads in a single data field). A zero or
-// negative value leaves the default unchanged. At most one value is used;
-// additional values are ignored.
+// NewReader creates a [Reader] that parses the SSE event stream from r,
+// using the scanner's default 64 KiB per-line buffer. Panics if r is nil.
 //
 // No I/O is performed during construction; the scanner is initialised lazily
-// on the first call to [Reader.Messages].
-func NewReader(r io.Reader, bufSize ...int) *Reader {
+// on the first call to [Reader.Messages]. Use [NewReaderSize] when the stream
+// may contain lines exceeding 64 KiB.
+func NewReader(r io.Reader) *Reader {
 	if r == nil {
 		panic("sse: reader cannot be nil")
 	}
+	return &Reader{r: r}
+}
 
-	size := 0
-	if len(bufSize) > 0 && bufSize[0] > 0 {
-		size = bufSize[0]
+// NewReaderSize creates a [Reader] with a custom per-line buffer size,
+// overriding the scanner's default 64 KiB. Pass a larger value when the
+// stream may contain lines exceeding 64 KiB (e.g. large JSON payloads in a
+// single data field). A zero or negative value falls back to the default.
+// Panics if r is nil.
+func NewReaderSize(r io.Reader, bufSize int) *Reader {
+	rd := NewReader(r)
+	if bufSize > 0 {
+		rd.bufSize = bufSize
 	}
-
-	return &Reader{
-		r:       r,
-		bufSize: size,
-		dataBuf: bytes.NewBuffer(nil),
-	}
+	return rd
 }
 
 // NewHTTPReader creates a [Reader] from an HTTP response, first verifying that
 // the Content-Type header is "text/event-stream" as required by §9.2.5
-// ("This event stream format's MIME type is text/event-stream").
-//
-// The optional bufSize argument is forwarded to [NewReader]; see its
-// documentation for details.
-func NewHTTPReader(resp *http.Response, bufSize ...int) (*Reader, error) {
-	if resp == nil {
-		return nil, errors.New("sse: http.Response cannot be nil")
+// ("This event stream format's MIME type is text/event-stream"). Use
+// [NewHTTPReaderSize] for a custom per-line buffer size.
+func NewHTTPReader(resp *http.Response) (*Reader, error) {
+	if err := checkSSEResponse(resp); err != nil {
+		return nil, err
 	}
-
-	contentType := resp.Header.Get("Content-Type")
-	if contentType == "" {
-		return nil, errors.New("sse: missing Content-Type header")
-	}
-
-	if !strings.HasPrefix(contentType, "text/event-stream") {
-		return nil, fmt.Errorf("sse: Content-Type must be 'text/event-stream', got %q", contentType)
-	}
-
-	return NewReader(resp.Body, bufSize...), nil
+	return NewReader(resp.Body), nil
 }
 
-// parseLine applies the per-line processing rules from §9.2.6 to a single
-// non-empty line and updates the reader's field buffers accordingly.
+// NewHTTPReaderSize is like [NewHTTPReader] but uses a custom per-line buffer
+// size; see [NewReaderSize] for semantics.
+func NewHTTPReaderSize(resp *http.Response, bufSize int) (*Reader, error) {
+	if err := checkSSEResponse(resp); err != nil {
+		return nil, err
+	}
+	return NewReaderSize(resp.Body, bufSize), nil
+}
+
+// checkSSEResponse validates that resp carries an SSE-compatible
+// Content-Type header (§9.2.5).
+func checkSSEResponse(resp *http.Response) error {
+	if resp == nil {
+		return errors.New("sse: http.Response cannot be nil")
+	}
+	contentType := resp.Header.Get("Content-Type")
+	if contentType == "" {
+		return errors.New("sse: missing Content-Type header")
+	}
+	if !strings.HasPrefix(contentType, "text/event-stream") {
+		return fmt.Errorf("sse: Content-Type must be 'text/event-stream', got %q", contentType)
+	}
+	return nil
+}
+
+// parseLine implements the per-line processing rules from §9.2.6 on a single
+// non-empty line and updates the reader's field buffers in place.
 //
-// The spec defines four cases:
-//
-//  1. Line starts with ':' → comment; ignore entirely.
-//     ("If the line starts with a U+003A COLON character (:), ignore the line.")
-//
-//  2. Line contains ':' → split at the first colon; strip one leading space
-//     from the value if present; process as a named field.
-//     ("If value starts with a U+0020 SPACE character, remove it from value.")
-//
-//  3. Line contains no ':' → the whole line is the field name; value is "".
-//     ("Process the field using the whole line as the field name, and the
-//     empty string as the field value.")
-//
-// Field-specific rules (§9.2.6 "process the field"):
-//
-//   - "event" → set eventType to value.
-//   - "data"  → append value + U+000A LF to dataBuf.
-//   - "id"    → if value contains no U+0000 NULL, update lastEventID;
-//     otherwise ignore ("If the field value does not contain U+0000 NULL,
-//     then set the last event ID buffer to the field value.").
-//   - "retry" → if value is all ASCII digits, parse as milliseconds and store;
-//     otherwise ignore ("If the field value consists of only ASCII digits…").
-//   - anything else → ignore ("The field is ignored.").
-func (r *Reader) parseLine(line string) {
+// line is a slice owned by the scanner — invalidated by the next
+// [bufio.Scanner.Scan] call. Values that must outlive this method
+// (lastEventID, eventType) are converted to string at the point of storage;
+// values that flow through unchanged (data, retry) avoid the per-line string
+// allocation that [bufio.Scanner.Text] would impose.
+func (r *Reader) parseLine(line []byte) {
 	// Case 1: comment line — discard.
-	if strings.HasPrefix(line, colon) {
+	if line[0] == ':' {
 		return
 	}
 
-	field, value, found := strings.Cut(line, colon)
-	if !found {
-		// Case 3: no colon — whole line is field name, value is empty.
-		field = line
-		value = ""
-	} else {
+	field, value, found := bytes.Cut(line, []byte{':'})
+	if found {
 		// Case 2: strip a single leading space from the value (§9.2.6).
-		value = strings.TrimPrefix(value, space)
+		value = bytes.TrimPrefix(value, []byte{' '})
+	} else {
+		// Case 3: no colon — whole line is the field name, value is empty.
+		field = line
+		value = nil
 	}
 
-	switch field {
+	// switch string([]byte) is a compiler-recognised zero-allocation pattern.
+	switch string(field) {
 	case fieldID:
-		// Ignore id values that contain U+0000 NULL (§9.2.6).
-		if !strings.Contains(value, null) {
-			r.lastEventID = value
+		// §9.2.6: ignore id values that contain U+0000 NULL.
+		if bytes.IndexByte(value, 0) < 0 {
+			r.lastEventID = string(value)
 		}
 
 	case fieldEvent:
-		r.eventType = value
+		r.eventType = string(value)
 
 	case fieldData:
-		// Append value then U+000A LF to the data buffer (§9.2.6).
-		r.dataBuf.WriteString(value)
-		r.dataBuf.WriteString(lf)
+		// §9.2.6: append value followed by U+000A LF.
+		r.dataBuf.Write(value)
+		r.dataBuf.WriteByte('\n')
 
 	case fieldRetry:
-		// Value must consist solely of ASCII digits; ignore otherwise (§9.2.6).
-		if len(value) == 0 {
-			return
-		}
-		for _, ch := range value {
-			if ch < '0' || ch > '9' {
-				return
-			}
-		}
-
-		ms, err := strconv.Atoi(value)
+		// §9.2.6: value must consist solely of ASCII digits; otherwise ignore.
+		// ParseUint enforces non-empty, digits-only (rejects sign prefixes),
+		// and overflow in a single call.
+		ms, err := strconv.ParseUint(string(value), 10, 63)
 		if err != nil {
 			return
 		}
@@ -223,17 +192,8 @@ func (r *Reader) parseLine(line string) {
 
 // buildMessage runs the dispatch algorithm from §9.2.6 when a blank line is
 // encountered, assembling a [Message] from the accumulated field buffers.
-//
-// Dispatch steps (§9.2.6):
-//
-//  1. Copy lastEventID into the message (buffer is not cleared).
-//  2. If dataBuf is empty, clear eventType and retry, then return (false) —
-//     events with no data are discarded without dispatch.
-//  3. Strip the trailing U+000A LF appended after the last "data" line.
-//     The slice is cloned so it does not alias dataBuf's memory, which is
-//     overwritten on the next Reset.
-//  4. Set Event to eventType, or "message" if eventType is empty.
-//  5. Clear dataBuf and eventType (retry is also cleared here).
+// Returns ok=false when there is nothing to dispatch (empty data buffer);
+// in that case the buffers are still cleared for the next event.
 func (r *Reader) buildMessage() (Message, bool) {
 	// Dispatch step 2: empty data buffer → discard.
 	if r.dataBuf.Len() == 0 {
@@ -243,7 +203,14 @@ func (r *Reader) buildMessage() (Message, bool) {
 	}
 
 	// Dispatch step 3: remove the trailing LF appended by the last "data" line.
-	data := bytes.Clone(bytes.TrimSuffix(r.dataBuf.Bytes(), []byte(lf)))
+	// dataBuf is non-empty at this point, so the last byte is the LF appended by
+	// parseLine. Clone the result so it does not alias dataBuf's memory, which
+	// is overwritten on the next Reset.
+	buf := r.dataBuf.Bytes()
+	if n := len(buf); n > 0 && buf[n-1] == '\n' {
+		buf = buf[:n-1]
+	}
+	data := bytes.Clone(buf)
 
 	// Dispatch step 4: default event type is "message".
 	msg := Message{
@@ -309,7 +276,7 @@ func (r *Reader) Messages(ctx context.Context) iter.Seq2[Message, error] {
 				break
 			}
 
-			line := r.scanner.Text()
+			line := r.scanner.Bytes()
 
 			if len(line) == 0 {
 				// Blank line: attempt to dispatch the current event (§9.2.6).

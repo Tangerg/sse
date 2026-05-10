@@ -1,7 +1,6 @@
 package sse
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -10,7 +9,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // flushWriter wraps an [http.ResponseWriter] and calls Flush after every Write,
@@ -88,16 +86,6 @@ func NewHTTPWriter(rw http.ResponseWriter) (*Writer, error) {
 	}), nil
 }
 
-// fieldBuf is an in-memory buffer for building a single SSE event frame before
-// writing it atomically to the underlying writer.
-type fieldBuf struct {
-	*bytes.Buffer
-}
-
-func newFieldBuf(capacity int) *fieldBuf {
-	return &fieldBuf{bytes.NewBuffer(make([]byte, 0, capacity))}
-}
-
 // newlineStripper removes CR and LF characters from field values before they
 // are written to the wire.
 //
@@ -110,89 +98,95 @@ func newFieldBuf(capacity int) *fieldBuf {
 // field boundaries or blank-line dispatch triggers.
 var newlineStripper = strings.NewReplacer("\r\n", "", "\r", "", "\n", "")
 
-// write appends one SSE line in the form "field: value\n" (§9.2.5 field rule).
-// When field is empty the line is a comment (": value\n", §9.2.5 comment rule).
-func (b *fieldBuf) write(field, value string) {
+// stripNewlines is a fast-path wrapper around [newlineStripper].
+// strings.NewReplacer.Replace allocates a fresh string on every call, even
+// when no replacement occurs. The vast majority of field values contain no
+// CR/LF, so we short-circuit to return s unchanged when neither byte appears.
+func stripNewlines(s string) string {
+	if strings.IndexAny(s, "\r\n") < 0 {
+		return s
+	}
+	return newlineStripper.Replace(s)
+}
+
+// writeField appends one SSE line in the form "field: value\n" (§9.2.5 field
+// rule). When field is empty the line is a comment (": value\n", §9.2.5
+// comment rule).
+func writeField(buf *bytes.Buffer, field, value string) {
 	if field != "" {
-		b.WriteString(field)
+		buf.WriteString(field)
 	}
-	b.WriteString(colon)
-	b.WriteString(space)
-	b.WriteString(newlineStripper.Replace(value))
-	b.WriteString(lf)
-}
-
-// writeID writes an "id" field line. An empty id is omitted; the receiver will
-// then inherit the last event ID from a previous event (§9.2.6 dispatch step 1).
-func (b *fieldBuf) writeID(id string) {
-	if len(id) == 0 {
-		return
-	}
-	b.write(fieldID, id)
-}
-
-// writeEvent writes an "event" field line. An empty event type is omitted; the
-// receiver will default the event type to "message" on dispatch (§9.2.6
-// dispatch step 4).
-func (b *fieldBuf) writeEvent(event string) {
-	if len(event) == 0 {
-		return
-	}
-	b.write(fieldEvent, event)
+	buf.WriteString(colon)
+	buf.WriteString(space)
+	buf.WriteString(stripNewlines(value))
+	buf.WriteString(lf)
 }
 
 // writeData encodes the payload as one "data" field line per logical line
 // (§9.2.6: "Append the field value to the data buffer, then append a single
 // U+000A LINE FEED (LF) character to the data buffer.").
 //
-// Multi-line values are split using [splitLine] so that all three SSE line
-// endings are handled correctly. When data ends with a line terminator an
-// extra empty "data:" line is appended, because the scanner never emits a
-// trailing empty token — without it the receiver would lose the trailing
-// newline after reassembly.
+// Multi-line values are split inline on the three SSE line endings (CRLF, CR,
+// LF) — equivalent to running [splitLine] but without allocating a
+// [bufio.Scanner] and a [bytes.Reader] per call. When data ends with a line
+// terminator an extra empty "data:" line is appended so the receiver does
+// not lose the trailing newline after reassembly.
 //
 // An empty data slice is omitted entirely; the resulting event will be
 // discarded by the receiver per §9.2.6 dispatch step 2.
-func (b *fieldBuf) writeData(data []byte) {
+func writeData(buf *bytes.Buffer, data []byte) {
 	if len(data) == 0 {
 		return
 	}
 
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	scanner.Split(splitLine)
-	for scanner.Scan() {
-		b.write(fieldData, scanner.Text())
-	}
+	for {
+		i := bytes.IndexAny(data, "\r\n")
+		if i < 0 {
+			// No more terminators — last line without a trailing terminator.
+			writeDataLine(buf, data)
+			return
+		}
 
-	// splitLine returns (0, nil, nil) when atEOF and the buffer is empty,
-	// so the scanner never emits a trailing empty token. Write an explicit
-	// empty data line when the payload ends with a line terminator.
-	if last := data[len(data)-1]; last == lf[0] || last == cr[0] {
-		b.write(fieldData, "")
+		writeDataLine(buf, data[:i])
+
+		// Consume the terminator: CRLF / CR / LF.
+		if data[i] == '\r' && i+1 < len(data) && data[i+1] == '\n' {
+			data = data[i+2:]
+		} else {
+			data = data[i+1:]
+		}
+
+		if len(data) == 0 {
+			// Payload ended on a terminator → emit an explicit empty data
+			// line so the receiver preserves the trailing newline.
+			writeDataLine(buf, nil)
+			return
+		}
 	}
 }
 
-// writeRetry writes a "retry" field line with the duration converted to
-// milliseconds (§9.2.6: "interpret the field value as an integer in base ten").
-// A zero or negative duration is omitted.
-func (b *fieldBuf) writeRetry(retry time.Duration) {
-	if retry <= 0 {
-		return
-	}
-	b.write(fieldRetry, strconv.FormatInt(retry.Milliseconds(), 10))
+// writeDataLine appends one "data: <value>\n" line. value is already known to
+// contain no CR/LF (writeData split on them), so the slow newline-stripping
+// path is bypassed entirely.
+func writeDataLine(buf *bytes.Buffer, value []byte) {
+	buf.WriteString(fieldData)
+	buf.WriteString(colon)
+	buf.WriteString(space)
+	buf.Write(value)
+	buf.WriteString(lf)
 }
 
 // writeComment writes an SSE comment line (§9.2.5: "comment = colon *any-char
 // end-of-line"). An empty comment writes a bare colon line (":\n") so that
 // sw.Comment(ctx, "") is a valid spec-compliant heartbeat; a non-empty comment
 // adds a space separator (": value\n").
-func (b *fieldBuf) writeComment(comment string) {
-	b.WriteString(colon)
+func writeComment(buf *bytes.Buffer, comment string) {
+	buf.WriteString(colon)
 	if comment != "" {
-		b.WriteString(space)
-		b.WriteString(newlineStripper.Replace(comment))
+		buf.WriteString(space)
+		buf.WriteString(stripNewlines(comment))
 	}
-	b.WriteString(lf)
+	buf.WriteString(lf)
 }
 
 // Message encodes msg as a complete SSE event frame and writes it atomically
@@ -214,12 +208,18 @@ func (w *Writer) Message(ctx context.Context, msg Message) error {
 		return err
 	}
 
-	buf := newFieldBuf(len(msg.ID) + len(msg.Event) + 2*len(msg.Data) + 8)
+	buf := bytes.NewBuffer(make([]byte, 0, len(msg.ID)+len(msg.Event)+2*len(msg.Data)+8))
 
-	buf.writeID(msg.ID)
-	buf.writeEvent(msg.Event)
-	buf.writeData(msg.Data)
-	buf.writeRetry(msg.Retry)
+	if msg.ID != "" {
+		writeField(buf, fieldID, msg.ID)
+	}
+	if msg.Event != "" {
+		writeField(buf, fieldEvent, msg.Event)
+	}
+	writeData(buf, msg.Data)
+	if msg.Retry > 0 {
+		writeField(buf, fieldRetry, strconv.FormatInt(msg.Retry.Milliseconds(), 10))
+	}
 	buf.WriteString(lf)
 
 	_, err := w.w.Write(buf.Bytes())
@@ -250,8 +250,8 @@ func (w *Writer) Comment(ctx context.Context, comment string) error {
 		return err
 	}
 
-	buf := newFieldBuf(len(comment) + 4)
-	buf.writeComment(comment)
+	buf := bytes.NewBuffer(make([]byte, 0, len(comment)+4))
+	writeComment(buf, comment)
 	buf.WriteString(lf)
 
 	_, err := w.w.Write(buf.Bytes())
