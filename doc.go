@@ -1,61 +1,46 @@
-// Package sse implements reading and writing of Server-Sent Events (SSE)
-// streams as defined by the WHATWG HTML Living Standard §9.2.
+// Package sse reads and writes Server-Sent Events (SSE) streams as defined by
+// the WHATWG HTML Living Standard §9.2.
 // https://html.spec.whatwg.org/multipage/server-sent-events.html
 //
-// # Stream format (§9.2.5)
+// The package covers the core parsing and serialisation rules of §9.2: BOM
+// stripping, all three line endings (LF, CR, CRLF), the four fields (data,
+// event, id, retry), the single-leading-space rule, id/retry validation, and
+// blank-line dispatch. It does not implement the full HTML EventSource client
+// (automatic reconnection, request retries, or the UTF-8 decode algorithm's
+// replacement of malformed sequences with U+FFFD — bytes pass through
+// unchanged), which are the caller's responsibility.
 //
-// An SSE stream is a UTF-8 encoded sequence of events separated by blank
-// lines. Each event is a sequence of field lines followed by one blank line
-// that triggers dispatch. The ABNF grammar is:
+// # Reading
 //
-//	stream      = [ bom ] *event
-//	event       = *( comment / field ) end-of-line
-//	comment     = colon *any-char end-of-line
-//	field       = 1*name-char [ colon [ space ] *any-char ] end-of-line
-//	end-of-line = ( cr lf / cr / lf )
+// A [Reader] yields one [Message] per event. Messages returns a
+// range-over-func iterator; a clean end of stream ends the loop without an
+// error.
 //
-// Four field names are defined: "data", "event", "id", and "retry".
-// Any other field name is silently ignored.
+//	resp, _ := http.Get(url)
+//	defer resp.Body.Close()
 //
-// # Parsing (§9.2.6)
+//	r, err := sse.NewHTTPReader(resp)
+//	if err != nil { ... }
+//	for msg, err := range r.Messages() {
+//	    if err != nil { ... }
+//	    fmt.Println(msg.Event, string(msg.Data))
+//	}
 //
-// The stream is decoded as UTF-8; a leading BOM (U+FEFF) is stripped before
-// parsing begins. Lines are then processed one by one:
+// [NewHTTPReader] validates the response media type; for any other source use
+// [NewReader]. There is no context parameter: to interrupt a read blocked on a
+// stalled connection, close the underlying reader; to stop early, break the
+// loop. When a single data field may exceed 64 KiB (e.g. a large JSON payload),
+// raise [Reader.MaxLineBytes] before the first call to Messages; for untrusted
+// input, set [Reader.MaxEventBytes] to bound the total size of one event.
 //
-//   - Blank line: dispatch the current event (see below).
-//   - Starts with ':': comment line, ignored entirely.
-//   - Contains ':': split at the first colon; strip one leading space from the
-//     value if present; process as a named field.
-//   - No ':': treat the entire line as the field name with an empty value.
+// After the loop ends, [Reader.LastEventID] and [Reader.Retry] report the
+// reconnection state needed to reconnect — including values from standalone
+// "id:" or "retry:" frames that dispatched no event.
 //
-// Field processing rules:
+// # Writing
 //
-//   - "event" – set the event-type buffer to the field value.
-//   - "data"  – append the field value followed by U+000A LF to the data buffer.
-//   - "id"    – if the value contains no U+0000 NULL, update the last-event-ID
-//     buffer; otherwise ignore. The buffer is never reset between events —
-//     it persists until the server explicitly clears it.
-//   - "retry" – if the value consists solely of ASCII digits, set the
-//     reconnection time (in ms); otherwise ignore the field.
-//
-// Dispatch algorithm (blank line):
-//
-//  1. Copy the last-event-ID buffer into the event's ID (it is not cleared).
-//  2. If the data buffer is empty, clear the event-type buffer and return
-//     without firing — events with no data are discarded.
-//  3. Strip the trailing U+000A LF that was appended after the last data line.
-//  4. Set the event type to the event-type buffer value, or "message" if empty.
-//  5. Clear the data buffer and the event-type buffer.
-//
-// Any data accumulated when the stream ends without a final blank line is
-// discarded (§9.2.6: "If the file ends in the middle of an event, before the
-// final empty line, the incomplete event is not dispatched.").
-//
-// # Writing events
-//
-// Use [NewHTTPWriter] inside an HTTP handler to obtain a [Writer] that sets
-// the required response headers and flushes each event to the client
-// immediately:
+// A [Writer] serialises events. [NewHTTPWriter] sets the SSE response headers
+// and flushes each frame to the client:
 //
 //	func handler(w http.ResponseWriter, r *http.Request) {
 //	    sw, err := sse.NewHTTPWriter(w)
@@ -63,54 +48,24 @@
 //	        http.Error(w, err.Error(), http.StatusInternalServerError)
 //	        return
 //	    }
-//	    sw.Message(r.Context(), sse.Message{Event: "update", Data: []byte("hello")})
-//	    sw.Comment(r.Context(), "keep-alive") // heartbeat
+//	    sw.Message(sse.Message{Event: "update", Data: []byte("hello")})
+//	    sw.Comment("keep-alive") // heartbeat (§9.2.7)
 //	}
 //
-// For non-HTTP destinations use [NewWriter]. It panics if w is nil:
+// Every [Writer.Message] call emits a dispatchable event, including a "data:"
+// line even when Data is empty, so an event carrying only a type is
+// expressible. An ID containing CR, LF, or NUL, or an event type containing CR
+// or LF, is rejected with an error rather than silently altered. For non-HTTP
+// destinations use [NewWriter].
 //
-//	sw := sse.NewWriter(w)
+// [Writer.Retry] and [Writer.ResetID] emit standalone control frames — a new
+// reconnection time or a reset of the last event ID — without dispatching an
+// event.
 //
-// # Reading events
+// # Retry
 //
-// Use [NewHTTPReader] to consume an SSE response:
-//
-//	resp, _ := http.Get(url)
-//	defer resp.Body.Close()
-//
-//	sr, err := sse.NewHTTPReader(resp)
-//	for msg, err := range sr.Messages(ctx) {
-//	    if err != nil { ... }
-//	    fmt.Println(msg.Event, string(msg.Data))
-//	}
-//
-// The error value is non-nil only on context cancellation or an I/O error;
-// normal end-of-stream is not reported as an error — the loop simply ends.
-//
-// Context cancellation is cooperative (checked between scans). To unblock a
-// scan waiting on a stalled connection, close the underlying reader:
-//
-//	resp.Body.Close()
-//
-// Use [NewHTTPReaderSize] or [NewReaderSize] to raise the per-line buffer
-// above the default 64 KiB when the stream may carry payloads that exceed
-// that limit in a single data field (e.g. large JSON objects):
-//
-//	sr, err := sse.NewHTTPReaderSize(resp, 256*1024) // 256 KiB per line
-//
-// For non-HTTP sources use [NewReader] (or [NewReaderSize]), which panics
-// if r is nil. No I/O is performed during construction; the scanner is
-// initialised lazily on the first call to [Reader.Messages]:
-//
-//	sr := sse.NewReader(r)
-//	sr := sse.NewReaderSize(r, 256*1024) // with custom buffer size
-//
-// # Heartbeats (§9.2.7)
-//
-// Proxy servers may drop idle HTTP connections after a short timeout.
-// The spec recommends sending a comment line roughly every 15 seconds.
-// An empty string is a valid comment and produces the minimal wire frame
-// ":\n\n" (bare colon line followed by a blank line):
-//
-//	sw.Comment(ctx, "")
+// Per §9.2.6 the retry (reconnection) time is stream-level state, not a
+// per-event field: once a stream sets it, [Message.Retry] reports the same value
+// on every subsequent event until the stream changes it. Writing a positive
+// [Message.Retry] emits a retry line that the receiver keeps until updated.
 package sse

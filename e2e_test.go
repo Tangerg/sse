@@ -1,7 +1,6 @@
 package sse_test
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -45,7 +44,7 @@ func connect(t *testing.T, srv *httptest.Server) *sse.Reader {
 func collectAll(t *testing.T, r *sse.Reader) []sse.Message {
 	t.Helper()
 	var msgs []sse.Message
-	for msg, err := range r.Messages(context.Background()) {
+	for msg, err := range r.Messages() {
 		if err != nil {
 			t.Fatalf("Messages: %v", err)
 		}
@@ -56,11 +55,9 @@ func collectAll(t *testing.T, r *sse.Reader) []sse.Message {
 
 func TestE2E_SingleMessage(t *testing.T) {
 	srv := serve(t, func(w *sse.Writer) {
-		w.Message(context.Background(), sse.Message{
-			ID:    "1",
-			Event: "greet",
-			Data:  []byte("hello"),
-		})
+		if err := w.Message(sse.Message{ID: "1", Event: "greet", Data: []byte("hello")}); err != nil {
+			return
+		}
 	})
 	defer srv.Close()
 
@@ -90,7 +87,9 @@ func TestE2E_MultipleMessages(t *testing.T) {
 
 	srv := serve(t, func(w *sse.Writer) {
 		for _, msg := range want {
-			w.Message(context.Background(), msg)
+			if err := w.Message(msg); err != nil {
+				return
+			}
 		}
 	})
 	defer srv.Close()
@@ -109,12 +108,14 @@ func TestE2E_MultipleMessages(t *testing.T) {
 
 func TestE2E_AllFields(t *testing.T) {
 	srv := serve(t, func(w *sse.Writer) {
-		w.Message(context.Background(), sse.Message{
+		if err := w.Message(sse.Message{
 			ID:    "42",
 			Event: "update",
 			Data:  []byte("payload"),
 			Retry: 2 * time.Second,
-		})
+		}); err != nil {
+			return
+		}
 	})
 	defer srv.Close()
 
@@ -140,7 +141,9 @@ func TestE2E_AllFields(t *testing.T) {
 
 func TestE2E_MultiLineData(t *testing.T) {
 	srv := serve(t, func(w *sse.Writer) {
-		w.Message(context.Background(), sse.Message{Data: []byte("line1\nline2\nline3")})
+		if err := w.Message(sse.Message{Data: []byte("line1\nline2\nline3")}); err != nil {
+			return
+		}
 	})
 	defer srv.Close()
 
@@ -155,10 +158,13 @@ func TestE2E_MultiLineData(t *testing.T) {
 }
 
 func TestE2E_HeartbeatComment(t *testing.T) {
-	// Comments must not produce messages on the client side.
 	srv := serve(t, func(w *sse.Writer) {
-		w.Comment(context.Background(), "heartbeat")
-		w.Message(context.Background(), sse.Message{Data: []byte("after heartbeat")})
+		if err := w.Comment("heartbeat"); err != nil {
+			return
+		}
+		if err := w.Message(sse.Message{Data: []byte("after heartbeat")}); err != nil {
+			return
+		}
 	})
 	defer srv.Close()
 
@@ -174,8 +180,12 @@ func TestE2E_HeartbeatComment(t *testing.T) {
 
 func TestE2E_IDPersistsAcrossEvents(t *testing.T) {
 	srv := serve(t, func(w *sse.Writer) {
-		w.Message(context.Background(), sse.Message{ID: "7", Data: []byte("first")})
-		w.Message(context.Background(), sse.Message{Data: []byte("second")}) // no id field
+		if err := w.Message(sse.Message{ID: "7", Data: []byte("first")}); err != nil {
+			return
+		}
+		if err := w.Message(sse.Message{Data: []byte("second")}); err != nil { // no id field
+			return
+		}
 	})
 	defer srv.Close()
 
@@ -187,15 +197,12 @@ func TestE2E_IDPersistsAcrossEvents(t *testing.T) {
 	if msgs[0].ID != "7" {
 		t.Errorf("msgs[0].ID = %q, want %q", msgs[0].ID, "7")
 	}
-	// The spec requires the last event ID to persist until the server resets it.
 	if msgs[1].ID != "7" {
 		t.Errorf("msgs[1].ID = %q, want %q (id must persist from previous event)", msgs[1].ID, "7")
 	}
 }
 
 func TestE2E_EarlyClientStop(t *testing.T) {
-	// The server streams messages indefinitely via a goroutine; the client
-	// must be able to stop iterating without deadlocking or panicking.
 	started := make(chan struct{})
 
 	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
@@ -206,7 +213,7 @@ func TestE2E_EarlyClientStop(t *testing.T) {
 		}
 		close(started)
 		for {
-			if err := w.Message(context.Background(), sse.Message{Data: []byte("tick")}); err != nil {
+			if err := w.Message(sse.Message{Data: []byte("tick")}); err != nil {
 				return
 			}
 		}
@@ -226,9 +233,8 @@ func TestE2E_EarlyClientStop(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Read exactly 3 messages then stop.
 	count := 0
-	for _, err := range r.Messages(context.Background()) {
+	for _, err := range r.Messages() {
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -262,11 +268,13 @@ func TestE2E_JSONData(t *testing.T) {
 			if err != nil {
 				return
 			}
-			w.Message(context.Background(), sse.Message{
+			if err := w.Message(sse.Message{
 				ID:    string(rune('1' + i)),
 				Event: "order.updated",
 				Data:  data,
-			})
+			}); err != nil {
+				return
+			}
 		}
 	})
 	defer srv.Close()
@@ -281,7 +289,6 @@ func TestE2E_JSONData(t *testing.T) {
 		if msg.Event != "order.updated" {
 			t.Errorf("msgs[%d].Event = %q, want %q", i, msg.Event, "order.updated")
 		}
-
 		var got orderEvent
 		if err := json.Unmarshal(msg.Data, &got); err != nil {
 			t.Fatalf("msgs[%d]: json.Unmarshal: %v", i, err)
@@ -307,8 +314,5 @@ func TestE2E_ResponseHeaders(t *testing.T) {
 	}
 	if cc := resp.Header.Get("Cache-Control"); cc != "no-cache" {
 		t.Errorf("Cache-Control = %q, want %q", cc, "no-cache")
-	}
-	if conn := resp.Header.Get("Connection"); conn != "keep-alive" {
-		t.Errorf("Connection = %q, want %q", conn, "keep-alive")
 	}
 }

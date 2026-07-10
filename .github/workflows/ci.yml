@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # Lint runs once on a stable toolchain with a pinned staticcheck, so it is
+  # reproducible and does not download a newer toolchain inside the test matrix.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "these files are not gofmt-ed:"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go: ['1.26', 'stable']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        run: go test -race -cover ./...

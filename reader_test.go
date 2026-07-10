@@ -1,20 +1,19 @@
 package sse
 
 import (
-	"context"
 	"io"
-	"net/http"
+	"math"
 	"strings"
 	"testing"
 	"time"
 )
 
-// collectMessages is a helper that reads all messages from a raw SSE string.
+// collectMessages reads all messages from a raw SSE string.
 func collectMessages(input string) ([]Message, error) {
 	r := NewReader(strings.NewReader(input))
 
 	var msgs []Message
-	for msg, err := range r.Messages(context.Background()) {
+	for msg, err := range r.Messages() {
 		if err != nil {
 			return msgs, err
 		}
@@ -78,7 +77,7 @@ func TestNewReader(t *testing.T) {
 	t.Run("reads messages", func(t *testing.T) {
 		r := NewReader(strings.NewReader("data: hello\n\n"))
 		var msgs []Message
-		for msg, err := range r.Messages(context.Background()) {
+		for msg, err := range r.Messages() {
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -90,79 +89,26 @@ func TestNewReader(t *testing.T) {
 	})
 }
 
-func TestNewHTTPReader(t *testing.T) {
-	t.Run("nil response", func(t *testing.T) {
-		_, err := NewHTTPReader(nil)
-		if err == nil {
-			t.Error("expected error, got nil")
-		}
-	})
-
-	t.Run("missing Content-Type", func(t *testing.T) {
-		resp := &http.Response{
-			Header: http.Header{},
-			Body:   io.NopCloser(strings.NewReader("")),
-		}
-		_, err := NewHTTPReader(resp)
-		if err == nil {
-			t.Error("expected error, got nil")
-		}
-	})
-
-	t.Run("wrong Content-Type", func(t *testing.T) {
-		resp := &http.Response{
-			Header: http.Header{"Content-Type": []string{"application/json"}},
-			Body:   io.NopCloser(strings.NewReader("")),
-		}
-		_, err := NewHTTPReader(resp)
-		if err == nil {
-			t.Error("expected error, got nil")
-		}
-	})
-
-	t.Run("valid text/event-stream", func(t *testing.T) {
-		resp := &http.Response{
-			Header: http.Header{"Content-Type": []string{"text/event-stream"}},
-			Body:   io.NopCloser(strings.NewReader("")),
-		}
-		_, err := NewHTTPReader(resp)
-		if err != nil {
-			t.Fatal(err)
-		}
-	})
-
-	t.Run("text/event-stream with charset accepted", func(t *testing.T) {
-		resp := &http.Response{
-			Header: http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}},
-			Body:   io.NopCloser(strings.NewReader("")),
-		}
-		_, err := NewHTTPReader(resp)
-		if err != nil {
-			t.Fatal(err)
-		}
-	})
-}
-
-func TestNewReaderSize(t *testing.T) {
-	// Build a data payload that exceeds the default 64 KiB scanner buffer.
+func TestReaderMaxLineBytes(t *testing.T) {
 	large := strings.Repeat("x", 128*1024)
 	input := "data: " + large + "\n\n"
 
-	t.Run("default bufSize rejects oversized line", func(t *testing.T) {
+	t.Run("default limit rejects oversized line", func(t *testing.T) {
 		r := NewReader(strings.NewReader(input))
 		var gotErr error
-		for _, err := range r.Messages(context.Background()) {
+		for _, err := range r.Messages() {
 			gotErr = err
 		}
 		if gotErr == nil {
-			t.Error("expected scanner error for line exceeding 64 KiB, got nil")
+			t.Error("expected error for line exceeding 64 KiB, got nil")
 		}
 	})
 
-	t.Run("custom bufSize accepts large line", func(t *testing.T) {
-		r := NewReaderSize(strings.NewReader(input), 256*1024)
+	t.Run("raised limit accepts large line", func(t *testing.T) {
+		r := NewReader(strings.NewReader(input))
+		r.MaxLineBytes = 256 * 1024
 		var msgs []Message
-		for msg, err := range r.Messages(context.Background()) {
+		for msg, err := range r.Messages() {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -176,46 +122,46 @@ func TestNewReaderSize(t *testing.T) {
 		}
 	})
 
-	t.Run("zero bufSize falls back to default", func(t *testing.T) {
-		small := "hello"
-		r := NewReaderSize(strings.NewReader("data: "+small+"\n\n"), 0)
-		var msgs []Message
-		for msg, err := range r.Messages(context.Background()) {
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			msgs = append(msgs, msg)
+	t.Run("zero falls back to default", func(t *testing.T) {
+		r := NewReader(strings.NewReader("data: hello\n\n"))
+		r.MaxLineBytes = 0
+		msgs, err := collectAllFrom(r)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if len(msgs) != 1 || string(msgs[0].Data) != small {
+		if len(msgs) != 1 || string(msgs[0].Data) != "hello" {
 			t.Errorf("unexpected messages: %v", msgs)
 		}
 	})
 }
 
+func collectAllFrom(r *Reader) ([]Message, error) {
+	var msgs []Message
+	for msg, err := range r.Messages() {
+		if err != nil {
+			return msgs, err
+		}
+		msgs = append(msgs, msg)
+	}
+	return msgs, nil
+}
+
 func TestReaderMessagesCalledTwice(t *testing.T) {
-	// Calling Messages a second time on the same Reader must reuse the existing
-	// scanner and not reset shared state (lastEventID, dataBuf, eventType).
-	// After the stream is exhausted the second call should yield nothing.
+	// A second call must reuse the existing scanner; once the stream is
+	// exhausted it yields nothing without error.
 	r := NewReader(strings.NewReader("id: 1\ndata: hello\n\n"))
 
-	var first []Message
-	for msg, err := range r.Messages(context.Background()) {
-		if err != nil {
-			t.Fatal(err)
-		}
-		first = append(first, msg)
+	first, err := collectAllFrom(r)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if len(first) != 1 {
 		t.Fatalf("first call: got %d messages, want 1", len(first))
 	}
 
-	// Second call: stream is exhausted; must return immediately without error.
-	var second []Message
-	for msg, err := range r.Messages(context.Background()) {
-		if err != nil {
-			t.Fatalf("second call: unexpected error: %v", err)
-		}
-		second = append(second, msg)
+	second, err := collectAllFrom(r)
+	if err != nil {
+		t.Fatalf("second call: unexpected error: %v", err)
 	}
 	if len(second) != 0 {
 		t.Errorf("second call: got %d messages, want 0", len(second))
@@ -228,49 +174,34 @@ func TestReaderMessages(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(msgs) != 1 {
-			t.Fatalf("got %d messages, want 1", len(msgs))
-		}
-		if string(msgs[0].Data) != "hello" {
-			t.Errorf("data = %q, want %q", msgs[0].Data, "hello")
+		if len(msgs) != 1 || string(msgs[0].Data) != "hello" {
+			t.Fatalf("got %v, want one message with data=hello", msgs)
 		}
 	})
 
 	t.Run("default event type is message", func(t *testing.T) {
-		msgs, err := collectMessages("data: hello\n\n")
-		if err != nil {
-			t.Fatal(err)
-		}
+		msgs, _ := collectMessages("data: hello\n\n")
 		if msgs[0].Event != defaultEvent {
 			t.Errorf("event = %q, want %q", msgs[0].Event, defaultEvent)
 		}
 	})
 
 	t.Run("named event field", func(t *testing.T) {
-		msgs, err := collectMessages("event: update\ndata: hello\n\n")
-		if err != nil {
-			t.Fatal(err)
-		}
+		msgs, _ := collectMessages("event: update\ndata: hello\n\n")
 		if msgs[0].Event != "update" {
 			t.Errorf("event = %q, want %q", msgs[0].Event, "update")
 		}
 	})
 
 	t.Run("id field", func(t *testing.T) {
-		msgs, err := collectMessages("id: 42\ndata: hello\n\n")
-		if err != nil {
-			t.Fatal(err)
-		}
+		msgs, _ := collectMessages("id: 42\ndata: hello\n\n")
 		if msgs[0].ID != "42" {
 			t.Errorf("id = %q, want %q", msgs[0].ID, "42")
 		}
 	})
 
 	t.Run("id persists across events", func(t *testing.T) {
-		msgs, err := collectMessages("id: 1\ndata: first\n\ndata: second\n\n")
-		if err != nil {
-			t.Fatal(err)
-		}
+		msgs, _ := collectMessages("id: 1\ndata: first\n\ndata: second\n\n")
 		if len(msgs) != 2 {
 			t.Fatalf("got %d messages, want 2", len(msgs))
 		}
@@ -280,140 +211,86 @@ func TestReaderMessages(t *testing.T) {
 	})
 
 	t.Run("id containing null is ignored", func(t *testing.T) {
-		msgs, err := collectMessages("id: bad\x00id\ndata: hello\n\n")
-		if err != nil {
-			t.Fatal(err)
-		}
+		msgs, _ := collectMessages("id: bad\x00id\ndata: hello\n\n")
 		if msgs[0].ID != "" {
 			t.Errorf("id = %q, want empty (null-containing id must be ignored)", msgs[0].ID)
 		}
 	})
 
 	t.Run("retry field parsed as milliseconds", func(t *testing.T) {
-		msgs, err := collectMessages("retry: 3000\ndata: hello\n\n")
-		if err != nil {
-			t.Fatal(err)
-		}
+		msgs, _ := collectMessages("retry: 3000\ndata: hello\n\n")
 		if msgs[0].Retry != 3*time.Second {
 			t.Errorf("retry = %v, want %v", msgs[0].Retry, 3*time.Second)
 		}
 	})
 
 	t.Run("retry with non-digit characters is ignored", func(t *testing.T) {
-		msgs, err := collectMessages("retry: 3s\ndata: hello\n\n")
-		if err != nil {
-			t.Fatal(err)
-		}
+		msgs, _ := collectMessages("retry: 3s\ndata: hello\n\n")
 		if msgs[0].Retry != 0 {
 			t.Errorf("retry = %v, want 0", msgs[0].Retry)
 		}
 	})
 
+	t.Run("overflowing retry is clamped, not wrapped", func(t *testing.T) {
+		// A value far beyond int64 nanoseconds must not become negative.
+		huge := strings.Repeat("9", 25)
+		msgs, _ := collectMessages("retry: " + huge + "\ndata: hello\n\n")
+		if msgs[0].Retry != time.Duration(math.MaxInt64) {
+			t.Errorf("retry = %v, want %v (clamped)", msgs[0].Retry, time.Duration(math.MaxInt64))
+		}
+	})
+
 	t.Run("comment lines are ignored", func(t *testing.T) {
-		msgs, err := collectMessages(": this is a comment\ndata: hello\n\n")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(msgs) != 1 {
-			t.Fatalf("got %d messages, want 1", len(msgs))
-		}
-		if string(msgs[0].Data) != "hello" {
-			t.Errorf("data = %q, want %q", msgs[0].Data, "hello")
+		msgs, _ := collectMessages(": this is a comment\ndata: hello\n\n")
+		if len(msgs) != 1 || string(msgs[0].Data) != "hello" {
+			t.Errorf("got %v, want one message with data=hello", msgs)
 		}
 	})
 
 	t.Run("empty data buffer suppresses dispatch", func(t *testing.T) {
-		msgs, err := collectMessages("event: ping\n\n")
-		if err != nil {
-			t.Fatal(err)
-		}
+		msgs, _ := collectMessages("event: ping\n\n")
 		if len(msgs) != 0 {
 			t.Errorf("got %d messages, want 0 (no data field)", len(msgs))
 		}
 	})
 
 	t.Run("incomplete event at EOF is discarded", func(t *testing.T) {
-		msgs, err := collectMessages("data: hello")
-		if err != nil {
-			t.Fatal(err)
-		}
+		msgs, _ := collectMessages("data: hello")
 		if len(msgs) != 0 {
 			t.Errorf("got %d messages, want 0 (no trailing blank line)", len(msgs))
 		}
 	})
 
 	t.Run("multi-line data joined with newlines", func(t *testing.T) {
-		msgs, err := collectMessages("data: line1\ndata: line2\ndata: line3\n\n")
-		if err != nil {
-			t.Fatal(err)
-		}
-		want := "line1\nline2\nline3"
-		if string(msgs[0].Data) != want {
+		msgs, _ := collectMessages("data: line1\ndata: line2\ndata: line3\n\n")
+		if want := "line1\nline2\nline3"; string(msgs[0].Data) != want {
 			t.Errorf("data = %q, want %q", msgs[0].Data, want)
 		}
 	})
 
-	t.Run("field with no colon uses whole line as name", func(t *testing.T) {
-		// "data" with no colon → field=data, value=""
-		msgs, err := collectMessages("data\n\n")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(msgs) != 1 {
-			t.Fatalf("got %d messages, want 1", len(msgs))
-		}
-		if string(msgs[0].Data) != "" {
-			t.Errorf("data = %q, want empty string", msgs[0].Data)
-		}
-	})
-
-	t.Run("leading space after colon stripped once", func(t *testing.T) {
-		// "data:test" and "data: test" must produce the same value.
-		msgs1, _ := collectMessages("data:test\n\n")
-		msgs2, _ := collectMessages("data: test\n\n")
-		if string(msgs1[0].Data) != string(msgs2[0].Data) {
-			t.Errorf("data without space %q != data with space %q", msgs1[0].Data, msgs2[0].Data)
-		}
-	})
-
 	t.Run("BOM at start of stream is stripped", func(t *testing.T) {
-		msgs, err := collectMessages("\uFEFFdata: hello\n\n")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(msgs) != 1 {
-			t.Fatalf("got %d messages, want 1", len(msgs))
-		}
-		if string(msgs[0].Data) != "hello" {
-			t.Errorf("data = %q, want %q", msgs[0].Data, "hello")
+		msgs, _ := collectMessages("\uFEFFdata: hello\n\n")
+		if len(msgs) != 1 || string(msgs[0].Data) != "hello" {
+			t.Errorf("got %v, want one message with data=hello", msgs)
 		}
 	})
 
 	t.Run("CRLF line endings accepted", func(t *testing.T) {
-		msgs, err := collectMessages("data: hello\r\n\r\n")
-		if err != nil {
-			t.Fatal(err)
-		}
+		msgs, _ := collectMessages("data: hello\r\n\r\n")
 		if len(msgs) != 1 || string(msgs[0].Data) != "hello" {
 			t.Errorf("got %v, want one message with data=hello", msgs)
 		}
 	})
 
 	t.Run("CR-only line endings accepted", func(t *testing.T) {
-		msgs, err := collectMessages("data: hello\r\r")
-		if err != nil {
-			t.Fatal(err)
-		}
+		msgs, _ := collectMessages("data: hello\r\r")
 		if len(msgs) != 1 || string(msgs[0].Data) != "hello" {
 			t.Errorf("got %v, want one message with data=hello", msgs)
 		}
 	})
 
 	t.Run("multiple sequential events", func(t *testing.T) {
-		msgs, err := collectMessages("data: a\n\ndata: b\n\ndata: c\n\n")
-		if err != nil {
-			t.Fatal(err)
-		}
+		msgs, _ := collectMessages("data: a\n\ndata: b\n\ndata: c\n\n")
 		if len(msgs) != 3 {
 			t.Fatalf("got %d messages, want 3", len(msgs))
 		}

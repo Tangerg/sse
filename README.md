@@ -1,15 +1,17 @@
 # sse
 
-A minimal, spec-compliant Go library for reading and writing
+A small Go library for reading and writing
 [Server-Sent Events (SSE)](https://html.spec.whatwg.org/multipage/server-sent-events.html).
 
-Implements the WHATWG HTML Living Standard §9.2 in full — BOM stripping,
-all three line endings (LF / CR / CRLF), all four field names (`data`, `event`,
-`id`, `retry`), and correct blank-line dispatch semantics.
+It covers the core parsing and serialisation rules of the WHATWG HTML Living
+Standard §9.2 — BOM stripping, all three line endings (LF / CR / CRLF), the four
+fields (`data`, `event`, `id`, `retry`), the single-leading-space rule, and
+blank-line dispatch. It is a codec, not an EventSource client: automatic
+reconnection and request retries are the caller's responsibility.
 
 ## Requirements
 
-Go 1.23 or later (uses `iter.Seq2` from the standard library introduced in Go 1.23).
+Go 1.26 or later.
 
 ## Installation
 
@@ -17,12 +19,12 @@ Go 1.23 or later (uses `iter.Seq2` from the standard library introduced in Go 1.
 go get github.com/Tangerg/sse
 ```
 
-## Usage
+## Writing
 
-### Writing events — HTTP server
+### HTTP server
 
-`NewHTTPWriter` sets the required response headers and flushes each event to
-the client immediately:
+`NewHTTPWriter` sets the SSE response headers and flushes each event to the
+client immediately:
 
 ```go
 func handler(w http.ResponseWriter, r *http.Request) {
@@ -32,7 +34,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    if err := sw.Message(r.Context(), sse.Message{
+    if err := sw.Message(sse.Message{
         ID:    "1",
         Event: "update",
         Data:  []byte("hello world"),
@@ -40,34 +42,53 @@ func handler(w http.ResponseWriter, r *http.Request) {
         return // client disconnected
     }
 
-    // Send a heartbeat comment every ~15 s to prevent proxy timeouts (§9.2.7).
-    sw.Comment(r.Context(), "keep-alive")
+    // Heartbeat every ~15s to keep idle proxies from closing the connection.
+    sw.Comment("keep-alive")
 }
 ```
 
-Headers set automatically by `NewHTTPWriter`:
+Headers set by `NewHTTPWriter`:
 
 | Header          | Value                              |
 |-----------------|------------------------------------|
 | `Content-Type`  | `text/event-stream; charset=utf-8` |
-| `Connection`    | `keep-alive`                       |
-| `Cache-Control` | `no-cache` *(if not already set)*  |
+| `Cache-Control` | `no-cache` *(only if unset)*       |
 
-### Writing events — plain `io.Writer`
+No `Connection` header is set: it is a hop-by-hop header that HTTP/2 forbids.
+Flushing goes through `http.ResponseController`, so it works through middleware
+that wraps the `ResponseWriter`.
+
+### Plain `io.Writer`
 
 ```go
 sw := sse.NewWriter(w)
 
-if err := sw.Message(ctx, sse.Message{
+err := sw.Message(sse.Message{
     Event: "ping",
     Data:  []byte("{}"),
     Retry: 5 * time.Second,
-}); err != nil { ... }
+})
 ```
 
-### Reading events — HTTP client
+Every `Message` call emits a dispatchable event — a single `data:` line is
+written even when `Data` is empty, so an event carrying only a type (e.g. a
+refresh signal) is expressible. An `ID` containing CR, LF, or NUL, or an `Event`
+containing CR or LF, is rejected with an error rather than silently altered.
 
-`NewHTTPReader` validates the `Content-Type` header before parsing:
+`Retry` and `ResetID` emit standalone control frames — a new reconnection time,
+or a reset of the last event ID — without dispatching an event:
+
+```go
+sw.Retry(10 * time.Second) // retry: 10000
+sw.ResetID()               // id:
+```
+
+## Reading
+
+### HTTP client
+
+`NewHTTPReader` validates the response media type (with `mime.ParseMediaType`)
+before parsing:
 
 ```go
 resp, err := http.Get("https://example.com/events")
@@ -77,7 +98,7 @@ defer resp.Body.Close()
 sr, err := sse.NewHTTPReader(resp)
 if err != nil { ... }
 
-for msg, err := range sr.Messages(ctx) {
+for msg, err := range sr.Messages() {
     if err != nil {
         log.Fatal(err)
     }
@@ -85,60 +106,68 @@ for msg, err := range sr.Messages(ctx) {
 }
 ```
 
-The error value is non-nil only on context cancellation or an I/O error; normal
-end-of-stream is not reported as an error. Context cancellation is cooperative
-(checked between scans). To unblock a scan waiting on a stalled connection,
-close `resp.Body`.
+A clean end of stream ends the loop without an error; a non-nil error means an
+I/O failure, a line exceeding the buffer limit, or `ErrEventTooLarge`. There is
+no context parameter: to interrupt a read blocked on a stalled connection, close
+`resp.Body`; to stop consuming, break out of the loop.
 
-### Reading events — plain `io.Reader`
+After the loop ends, `LastEventID()` and `Retry()` report the reconnection state
+— including values from standalone `id:` or `retry:` frames that carried no
+event — so a caller can reconnect:
+
+```go
+if id := sr.LastEventID(); id != "" {
+    req.Header.Set("Last-Event-ID", id)
+} else {
+    req.Header.Del("Last-Event-ID")
+}
+if d, ok := sr.Retry(); ok {
+    time.Sleep(d)
+}
+```
+
+### Plain `io.Reader`
 
 ```go
 sr := sse.NewReader(r)
-
-for msg, err := range sr.Messages(ctx) {
+for msg, err := range sr.Messages() {
     ...
 }
 ```
 
 ### Large payloads
 
-The scanner's default per-line limit is 64 KiB. Use the `Size` constructors
-when the stream may carry larger payloads in a single `data` field (e.g.
-serialised JSON objects):
+The default per-line limit is 64 KiB. Raise `MaxLineBytes` before the first call
+to `Messages` when a single `data` field may be larger (e.g. a serialised JSON
+object):
 
 ```go
-sr, err := sse.NewHTTPReaderSize(resp, 512*1024) // 512 KiB per line
-sr        := sse.NewReaderSize(r,    512*1024)
+sr := sse.NewReader(r)
+sr.MaxLineBytes = 512 * 1024 // 512 KiB per line
 ```
 
-Lines that exceed the configured limit cause `Messages` to yield a non-nil
-error.
+A line exceeding the limit makes `Messages` yield a non-nil error. For untrusted
+streams, also set `MaxEventBytes` to bound the total data buffered for a single
+event (many small `data:` lines could otherwise grow without limit); exceeding it
+yields `ErrEventTooLarge`.
 
 ### JSON data
 
-`Message.Data` is `[]byte`, so pass the output of `json.Marshal` directly:
+`Message.Data` is `[]byte`, so pass `json.Marshal` output directly and
+`json.Unmarshal` on receipt:
 
 ```go
-// Server — writing
 payload, _ := json.Marshal(OrderEvent{OrderID: "ord_123", Status: "shipped"})
-if err := sw.Message(ctx, sse.Message{
-    ID:    "1",
-    Event: "order.updated",
-    Data:  payload,
-}); err != nil { ... }
+sw.Message(sse.Message{ID: "1", Event: "order.updated", Data: payload})
 
-// Client — reading
-for msg, err := range sr.Messages(ctx) {
+for msg, err := range sr.Messages() {
     if err != nil { log.Fatal(err) }
     var evt OrderEvent
     if err := json.Unmarshal(msg.Data, &evt); err != nil { log.Fatal(err) }
-    fmt.Printf("order %s is now %s\n", evt.OrderID, evt.Status)
 }
 ```
 
 ## API
-
-### `Message`
 
 ```go
 type Message struct {
@@ -147,51 +176,51 @@ type Message struct {
     Data  []byte
     Retry time.Duration
 }
+
+func NewReader(r io.Reader) *Reader
+func NewHTTPReader(resp *http.Response) (*Reader, error)
+func (r *Reader) Messages() iter.Seq2[Message, error]
+func (r *Reader) LastEventID() string
+func (r *Reader) Retry() (time.Duration, bool)
+// Reader.MaxLineBytes int  — per-line limit; 0 uses the 64 KiB default.
+// Reader.MaxEventBytes int — per-event data limit; 0 means unlimited.
+
+func NewWriter(w io.Writer) *Writer
+func NewHTTPWriter(rw http.ResponseWriter) (*Writer, error)
+func (w *Writer) Message(msg Message) error
+func (w *Writer) Comment(comment string) error
+func (w *Writer) Retry(delay time.Duration) error
+func (w *Writer) ResetID() error
 ```
 
 | Field   | Wire field | Notes |
 |---------|-----------|-------|
-| `ID`    | `id`      | Persists across events until the server resets it. Values containing U+0000 are ignored on receipt; an empty ID omits the field on write. |
-| `Event` | `event`   | Defaults to `"message"` when absent from the stream. An empty value omits the field on write. |
-| `Data`  | `data`    | Multi-line values are split into one `data:` line each. Events with no data are discarded (§9.2.6). |
-| `Retry` | `retry`   | Reconnection-time hint, converted to/from milliseconds. Zero or negative omits the field on write. |
-
-### `Writer`
-
-| Constructor / Method | Description |
-|---|---|
-| `NewWriter(w io.Writer) *Writer` | Writer for any `io.Writer`. Panics if w is nil. |
-| `NewHTTPWriter(rw http.ResponseWriter) (*Writer, error)` | Writer for HTTP; sets SSE headers and flushes after each write. |
-| `(*Writer).Message(ctx context.Context, msg Message) error` | Encode and write one SSE event frame. Returns immediately if ctx is done. |
-| `(*Writer).Comment(ctx context.Context, comment string) error` | Write an SSE comment line. Ignored by receivers but keeps the connection alive through proxies (§9.2.7). Returns immediately if ctx is done. |
-
-### `Reader`
-
-| Constructor / Method | Description |
-|---|---|
-| `NewReader(r io.Reader) *Reader` | Reader for any `io.Reader`. Panics if r is nil. No I/O on construction. Uses the scanner's default 64 KiB per-line limit. |
-| `NewReaderSize(r io.Reader, bufSize int) *Reader` | Like `NewReader` but with an explicit per-line buffer size; a zero or negative value falls back to the default. |
-| `NewHTTPReader(resp *http.Response) (*Reader, error)` | Reader from an HTTP response; validates `Content-Type: text/event-stream`. |
-| `NewHTTPReaderSize(resp *http.Response, bufSize int) (*Reader, error)` | Like `NewHTTPReader` but with a custom per-line buffer size. |
-| `(*Reader).Messages(ctx context.Context) iter.Seq2[Message, error]` | Iterator over all dispatched events. The scanner is initialised lazily on the first call and reused on subsequent calls. Normal end-of-stream yields no error. Non-nil error means context cancellation, I/O failure, or a line exceeding the buffer limit. To cancel a blocked read, close the underlying reader. |
+| `ID`    | `id`      | Last-event-ID. Persists across events on read; received values containing NUL are ignored. On write an empty ID omits the line. |
+| `Event` | `event`   | Defaults to `"message"` when absent. On write an empty value omits the line. |
+| `Data`  | `data`    | Multi-line values are one `data:` line each; joined with LF on read. An empty `Data` still emits one `data:` line so the event dispatches. |
+| `Retry` | `retry`   | Stream-level reconnection time. On read it persists across events once set (§9.2.6) and is reported on every message. On write a positive value emits a `retry:` line. |
 
 ## Spec compliance
 
-Implements WHATWG HTML Living Standard §9.2:
+Implements the core parsing/serialisation of WHATWG HTML Living Standard §9.2:
 <https://html.spec.whatwg.org/multipage/server-sent-events.html>
 
 | Requirement | §9.2 reference |
 |---|---|
-| UTF-8 BOM stripped from stream start | §9.2.6 — "UTF-8 decode algorithm strips one leading BOM" |
-| All three line endings: LF, CR, CRLF | §9.2.5 `end-of-line` production |
-| Single leading space after `:` stripped from field values | §9.2.6 — "If value starts with U+0020 SPACE, remove it" |
-| `id` values containing U+0000 ignored | §9.2.6 — "If the field value does not contain U+0000 NULL…" |
-| `retry` values with non-ASCII-digit characters ignored | §9.2.6 — "If the field value consists of only ASCII digits…" |
-| Trailing LF removed from data buffer on dispatch | §9.2.6 dispatch step 3 |
-| Events with empty data buffer discarded | §9.2.6 dispatch step 2 |
-| Last-event-ID persists across events | §9.2.6 dispatch step 1 — "The buffer does not get reset" |
-| Incomplete final event (no trailing blank line) discarded | §9.2.6 — "any pending data must be discarded" |
-| MIME type `text/event-stream` enforced on read | §9.2.5 |
+| Leading UTF-8 BOM stripped once | §9.2.6 |
+| All three line endings: LF, CR, CRLF | §9.2.5 `end-of-line` |
+| One leading space after `:` stripped from values | §9.2.6 |
+| `id` values containing NUL ignored on read; rejected on write | §9.2.6 |
+| `retry` values with non-digit characters ignored; overflow clamped | §9.2.6 |
+| Trailing LF removed from the data buffer on dispatch | §9.2.6 |
+| Events with an empty data buffer discarded on read | §9.2.6 |
+| Last-event-ID and retry persist across events | §9.2.6 |
+| Incomplete final event (no trailing blank line) discarded | §9.2.6 |
+| Media type `text/event-stream` enforced on read | §9.2.5 |
+
+Not implemented (out of scope): EventSource reconnection, and the UTF-8 decode
+step that replaces malformed byte sequences with U+FFFD — bytes pass through
+unchanged.
 
 ## License
 
