@@ -2,10 +2,25 @@ package sse
 
 import (
 	"bytes"
+	"errors"
+	"io"
 	"strings"
 	"testing"
-	"time"
 )
+
+type errorWriter struct {
+	err error
+}
+
+func (w errorWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
+type shortWriter struct{}
+
+func (shortWriter) Write(p []byte) (int, error) {
+	return len(p) - 1, nil
+}
 
 func TestNewWriter(t *testing.T) {
 	t.Run("nil writer panics", func(t *testing.T) {
@@ -29,8 +44,8 @@ func writeMessage(t *testing.T, msg Message) string {
 	t.Helper()
 	var buf bytes.Buffer
 	w := NewWriter(&buf)
-	if err := w.Message(msg); err != nil {
-		t.Fatalf("Message: %v", err)
+	if err := w.Write(msg); err != nil {
+		t.Fatalf("Write: %v", err)
 	}
 	return buf.String()
 }
@@ -46,7 +61,7 @@ func renderComment(t *testing.T, comment string) string {
 	return buf.String()
 }
 
-func TestWriterMessage(t *testing.T) {
+func TestWriterWrite(t *testing.T) {
 	t.Run("data field written", func(t *testing.T) {
 		if got := writeMessage(t, Message{Data: []byte("hello")}); !strings.Contains(got, "data: hello\n") {
 			t.Errorf("got %q", got)
@@ -77,18 +92,6 @@ func TestWriterMessage(t *testing.T) {
 		}
 	})
 
-	t.Run("retry field written in milliseconds", func(t *testing.T) {
-		if got := writeMessage(t, Message{Data: []byte("hello"), Retry: 5 * time.Second}); !strings.Contains(got, "retry: 5000\n") {
-			t.Errorf("got %q", got)
-		}
-	})
-
-	t.Run("zero retry field omitted", func(t *testing.T) {
-		if got := writeMessage(t, Message{Data: []byte("hello")}); strings.Contains(got, "retry:") {
-			t.Errorf("zero retry should be omitted, got %q", got)
-		}
-	})
-
 	t.Run("multi-line data splits into multiple data fields", func(t *testing.T) {
 		got := writeMessage(t, Message{Data: []byte("line1\nline2")})
 		if !strings.Contains(got, "data: line1\n") || !strings.Contains(got, "data: line2\n") {
@@ -114,7 +117,7 @@ func TestWriterMessage(t *testing.T) {
 		var buf bytes.Buffer
 		w := NewWriter(&buf)
 		for _, id := range []string{"a\nb", "a\rb", "a\x00b"} {
-			if err := w.Message(Message{ID: id, Data: []byte("x")}); err == nil {
+			if err := w.Write(Message{ID: id, Data: []byte("x")}); err == nil {
 				t.Errorf("ID %q: expected error, got nil", id)
 			}
 		}
@@ -127,9 +130,31 @@ func TestWriterMessage(t *testing.T) {
 		var buf bytes.Buffer
 		w := NewWriter(&buf)
 		for _, ev := range []string{"a\nb", "a\rb"} {
-			if err := w.Message(Message{Event: ev, Data: []byte("x")}); err == nil {
+			if err := w.Write(Message{Event: ev, Data: []byte("x")}); err == nil {
 				t.Errorf("Event %q: expected error, got nil", ev)
 			}
+		}
+	})
+
+	t.Run("invalid UTF-8 is rejected without writing", func(t *testing.T) {
+		tests := []struct {
+			name string
+			msg  Message
+		}{
+			{"ID", Message{ID: string([]byte{0xff}), Data: []byte("x")}},
+			{"event", Message{Event: string([]byte{0xff}), Data: []byte("x")}},
+			{"data", Message{Data: []byte{0xff}}},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				var buf bytes.Buffer
+				if err := NewWriter(&buf).Write(tt.msg); err == nil {
+					t.Fatal("expected invalid UTF-8 error, got nil")
+				}
+				if buf.Len() != 0 {
+					t.Errorf("wrote %q on validation error", buf.Bytes())
+				}
+			})
 		}
 	})
 }
@@ -152,6 +177,58 @@ func TestWriterComment(t *testing.T) {
 			t.Errorf("got %q, want %q", got, ": a\n: b\n")
 		}
 	})
+
+	t.Run("CRLF is one line ending", func(t *testing.T) {
+		if got := renderComment(t, "a\r\nb"); got != ": a\n: b\n" {
+			t.Errorf("got %q, want %q", got, ": a\n: b\n")
+		}
+	})
+
+	t.Run("trailing line ending preserves empty line", func(t *testing.T) {
+		for _, comment := range []string{"a\n", "a\r", "a\r\n"} {
+			if got := renderComment(t, comment); got != ": a\n:\n" {
+				t.Errorf("Comment(%q) = %q, want %q", comment, got, ": a\n:\n")
+			}
+		}
+	})
+
+	t.Run("invalid UTF-8 is rejected without writing", func(t *testing.T) {
+		var buf bytes.Buffer
+		err := NewWriter(&buf).Comment(string([]byte{0xff}))
+		if err == nil {
+			t.Fatal("expected invalid UTF-8 error, got nil")
+		}
+		if buf.Len() != 0 {
+			t.Errorf("wrote %q on validation error", buf.Bytes())
+		}
+	})
+}
+
+func TestWriterPropagatesWriteFailures(t *testing.T) {
+	want := errors.New("write failed")
+	operations := []struct {
+		name string
+		do   func(*Writer) error
+	}{
+		{"Write", func(w *Writer) error { return w.Write(Message{Data: []byte("x")}) }},
+		{"Comment", func(w *Writer) error { return w.Comment("ping") }},
+		{"Retry", func(w *Writer) error { return w.Retry(1) }},
+		{"ResetID", func(w *Writer) error { return w.ResetID() }},
+	}
+	for _, op := range operations {
+		t.Run(op.name, func(t *testing.T) {
+			if err := op.do(NewWriter(errorWriter{err: want})); !errors.Is(err, want) {
+				t.Errorf("error = %v, want %v", err, want)
+			}
+		})
+	}
+
+	t.Run("short write", func(t *testing.T) {
+		err := NewWriter(shortWriter{}).Write(Message{Data: []byte("x")})
+		if !errors.Is(err, io.ErrShortWrite) {
+			t.Errorf("error = %v, want io.ErrShortWrite", err)
+		}
+	})
 }
 
 func TestRoundTrip(t *testing.T) {
@@ -160,9 +237,10 @@ func TestRoundTrip(t *testing.T) {
 		msg  Message
 	}{
 		{"data only", Message{Data: []byte("hello")}},
-		{"all fields", Message{ID: "1", Event: "update", Data: []byte("hello world"), Retry: 3 * time.Second}},
+		{"all fields", Message{ID: "1", Event: "update", Data: []byte("hello world")}},
 		{"multi-line data", Message{Data: []byte("line1\nline2\nline3")}},
 		{"data ending with newline", Message{Data: []byte("hello\n")}},
+		{"NUL in event and data", Message{Event: "x\x00y", Data: []byte("a\x00b")}},
 		{"type only, empty data", Message{Event: "refresh"}},
 	}
 
@@ -170,7 +248,7 @@ func TestRoundTrip(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			w := NewWriter(&buf)
-			if err := w.Message(tt.msg); err != nil {
+			if err := w.Write(tt.msg); err != nil {
 				t.Fatal(err)
 			}
 
@@ -195,9 +273,6 @@ func TestRoundTrip(t *testing.T) {
 			}
 			if got.Event != wantEvent {
 				t.Errorf("event = %q, want %q", got.Event, wantEvent)
-			}
-			if tt.msg.Retry != 0 && got.Retry != tt.msg.Retry {
-				t.Errorf("retry = %v, want %v", got.Retry, tt.msg.Retry)
 			}
 		})
 	}

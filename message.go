@@ -1,7 +1,5 @@
 package sse
 
-import "time"
-
 // Wire-protocol constants derived from the ABNF in §9.2.5.
 //
 //	end-of-line = ( cr lf / cr / lf )
@@ -51,18 +49,10 @@ const defaultEvent = "message"
 //     the trailing LF is stripped. On write, Data is split on any line ending
 //     into one "data" line each; an empty Data still emits a single "data:" line
 //     so the event is dispatched (an event carrying only a type, e.g. a refresh
-//     signal, is therefore expressible).
-//
-//   - Retry is the stream's reconnection time. Per §9.2.6 it is stream-level
-//     state, not per-event: on read it persists across events once set and is
-//     reported on every subsequent Message. On write, a positive value emits a
-//     "retry" line, rounded up to the nearest millisecond (a positive
-//     sub-millisecond value becomes 1 ms); a zero value omits it and a negative
-//     value is an error. Use [Writer.Retry] to change the reconnection time
-//     without an event.
+//     signal, is therefore expressible). All fields must contain valid UTF-8
+//     when written; malformed input bytes are rejected.
 type Message struct {
 	ID    string
 	Event string
 	Data  []byte
-	Retry time.Duration
 }

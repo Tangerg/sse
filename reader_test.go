@@ -1,12 +1,21 @@
 package sse
 
 import (
+	"errors"
 	"io"
 	"math"
 	"strings"
 	"testing"
 	"time"
 )
+
+type errorReader struct {
+	err error
+}
+
+func (r errorReader) Read([]byte) (int, error) {
+	return 0, r.err
+}
 
 // collectMessages reads all messages from a raw SSE string.
 func collectMessages(input string) ([]Message, error) {
@@ -55,6 +64,38 @@ func TestStripBOM(t *testing.T) {
 			t.Errorf("expected empty, got %q", got)
 		}
 	})
+
+	t.Run("read error is wrapped", func(t *testing.T) {
+		want := errors.New("read failed")
+		if _, err := stripBOM(errorReader{err: want}); !errors.Is(err, want) {
+			t.Fatalf("error = %v, want wrapped %v", err, want)
+		}
+	})
+}
+
+func TestDecodeUTF8(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []byte
+		want string
+	}{
+		{"valid fast path", []byte("hello 世界"), "hello 世界"},
+		{"valid widths after malformed byte", []byte{0xff, 'A', 0xc2, 0xa2, 0xe1, 0x80, 0x80, 0xf1, 0x80, 0x80, 0x80}, "�A¢က\U00040000"},
+		{"E0 lower boundary", []byte{0xe0, 0x80, 0x80}, "���"},
+		{"ED upper boundary", []byte{0xed, 0xa0, 0x80}, "���"},
+		{"F0 lower boundary", []byte{0xf0, 0x80, 0x80, 0x80}, "����"},
+		{"F4 upper boundary", []byte{0xf4, 0x90, 0x80, 0x80}, "����"},
+		{"continuation error reprocesses byte", []byte{0xe1, 0x80, 'A'}, "�A"},
+		{"truncated sequence at EOF", []byte{0xf1, 0x80, 0x80}, "�"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := string(decodeUTF8(tt.in)); got != tt.want {
+				t.Errorf("decodeUTF8(% x) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestNewReader(t *testing.T) {
@@ -87,11 +128,53 @@ func TestNewReader(t *testing.T) {
 			t.Errorf("unexpected messages: %v", msgs)
 		}
 	})
+
+	t.Run("BOM read error is yielded", func(t *testing.T) {
+		want := errors.New("read failed")
+		r := NewReader(errorReader{err: want})
+		var got error
+		for _, err := range r.Messages() {
+			got = err
+		}
+		if !errors.Is(got, want) {
+			t.Fatalf("error = %v, want wrapped %v", got, want)
+		}
+	})
 }
 
 func TestReaderMaxLineBytes(t *testing.T) {
 	large := strings.Repeat("x", 128*1024)
 	input := "data: " + large + "\n\n"
+
+	for name, ending := range map[string]string{
+		"LF":   "\n",
+		"CR":   "\r",
+		"CRLF": "\r\n",
+	} {
+		t.Run("exact limit with "+name, func(t *testing.T) {
+			const max = 16
+			data := strings.Repeat("x", max-len("data: "))
+			r := NewReader(strings.NewReader("data: " + data + ending + ending))
+			r.MaxLineBytes = max
+			msgs, err := collectAllFrom(r)
+			if err != nil {
+				t.Fatalf("line at exact limit: %v", err)
+			}
+			if len(msgs) != 1 || string(msgs[0].Data) != data {
+				t.Errorf("got %v, want one message with data=%q", msgs, data)
+			}
+		})
+	}
+
+	t.Run("one byte over limit fails", func(t *testing.T) {
+		const max = 16
+		data := strings.Repeat("x", max-len("data: ")+1)
+		r := NewReader(strings.NewReader("data: " + data + "\n\n"))
+		r.MaxLineBytes = max
+		if _, err := collectAllFrom(r); err == nil {
+			t.Fatal("expected an error for a line over MaxLineBytes")
+		}
+	})
 
 	t.Run("default limit rejects oversized line", func(t *testing.T) {
 		r := NewReader(strings.NewReader(input))
@@ -218,25 +301,34 @@ func TestReaderMessages(t *testing.T) {
 	})
 
 	t.Run("retry field parsed as milliseconds", func(t *testing.T) {
-		msgs, _ := collectMessages("retry: 3000\ndata: hello\n\n")
-		if msgs[0].Retry != 3*time.Second {
-			t.Errorf("retry = %v, want %v", msgs[0].Retry, 3*time.Second)
+		r := NewReader(strings.NewReader("retry: 3000\ndata: hello\n\n"))
+		if _, err := collectAllFrom(r); err != nil {
+			t.Fatal(err)
+		}
+		if retry, ok := r.Retry(); !ok || retry != 3*time.Second {
+			t.Errorf("Retry() = (%v, %v), want (3s, true)", retry, ok)
 		}
 	})
 
 	t.Run("retry with non-digit characters is ignored", func(t *testing.T) {
-		msgs, _ := collectMessages("retry: 3s\ndata: hello\n\n")
-		if msgs[0].Retry != 0 {
-			t.Errorf("retry = %v, want 0", msgs[0].Retry)
+		r := NewReader(strings.NewReader("retry: 3s\ndata: hello\n\n"))
+		if _, err := collectAllFrom(r); err != nil {
+			t.Fatal(err)
+		}
+		if retry, ok := r.Retry(); ok {
+			t.Errorf("Retry() = (%v, %v), want (_, false)", retry, ok)
 		}
 	})
 
 	t.Run("overflowing retry is clamped, not wrapped", func(t *testing.T) {
 		// A value far beyond int64 nanoseconds must not become negative.
 		huge := strings.Repeat("9", 25)
-		msgs, _ := collectMessages("retry: " + huge + "\ndata: hello\n\n")
-		if msgs[0].Retry != time.Duration(math.MaxInt64) {
-			t.Errorf("retry = %v, want %v (clamped)", msgs[0].Retry, time.Duration(math.MaxInt64))
+		r := NewReader(strings.NewReader("retry: " + huge + "\ndata: hello\n\n"))
+		if _, err := collectAllFrom(r); err != nil {
+			t.Fatal(err)
+		}
+		if retry, ok := r.Retry(); !ok || retry != time.Duration(math.MaxInt64) {
+			t.Errorf("Retry() = (%v, %v), want (%v, true)", retry, ok, time.Duration(math.MaxInt64))
 		}
 	})
 

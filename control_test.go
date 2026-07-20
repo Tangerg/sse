@@ -35,18 +35,6 @@ func TestWriterRetryZero(t *testing.T) {
 	}
 }
 
-// Message and Writer.Retry agree on negative-retry handling: both reject it.
-func TestMessageNegativeRetryError(t *testing.T) {
-	var buf bytes.Buffer
-	w := NewWriter(&buf)
-	if err := w.Message(Message{Data: []byte("x"), Retry: -time.Second}); err == nil {
-		t.Error("expected error for negative Retry, got nil")
-	}
-	if buf.Len() != 0 {
-		t.Errorf("nothing should be written on error, got %q", buf.String())
-	}
-}
-
 func TestWriterRetryNegativeError(t *testing.T) {
 	var buf bytes.Buffer
 	w := NewWriter(&buf)
@@ -89,13 +77,6 @@ func TestWriterRetrySubMillisecondRoundsUp(t *testing.T) {
 	}
 	if got := buf.String(); got != "retry: 1\n\n" {
 		t.Errorf("got %q, want %q (sub-ms must round up to 1)", got, "retry: 1\n\n")
-	}
-}
-
-func TestMessageRetrySubMillisecondRoundsUp(t *testing.T) {
-	got := writeMessage(t, Message{Data: []byte("x"), Retry: 500 * time.Microsecond})
-	if !strings.Contains(got, "retry: 1\n") {
-		t.Errorf("got %q, want a retry: 1 line", got)
 	}
 }
 
@@ -297,7 +278,7 @@ func TestControlFrameRoundTrip(t *testing.T) {
 	t.Run("Writer.ResetID to Reader.LastEventID", func(t *testing.T) {
 		var buf bytes.Buffer
 		w := NewWriter(&buf)
-		if err := w.Message(Message{ID: "5", Data: []byte("x")}); err != nil {
+		if err := w.Write(Message{ID: "5", Data: []byte("x")}); err != nil {
 			t.Fatal(err)
 		}
 		if err := w.ResetID(); err != nil {

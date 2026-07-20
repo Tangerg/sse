@@ -4,6 +4,39 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.0.3] - 2026-07-20
+
+### Changed (breaking)
+
+- Removed `Message.Retry`; retry is stream-level state exposed exclusively by
+  `Reader.Retry` and `Writer.Retry`.
+- Renamed `Writer.Message` to `Writer.Write`.
+- `NewHTTPWriter` now returns only `*Writer`; nil input is a programmer error and
+  panics consistently with `NewWriter`.
+- Lowered the minimum Go version from 1.26 to 1.23, the first release with
+  range-over-function iterators.
+
+### Fixed
+
+- `Reader.MaxLineBytes` now accepts a line whose content is exactly at the
+  configured limit for LF, CR, and CRLF endings.
+- `Reader` now applies the Encoding Standard's UTF-8 replacement decoder,
+  including stripping exactly one leading BOM; malformed subsequences become
+  `U+FFFD` instead of leaking invalid bytes to messages.
+- `NewHTTPReader` now rejects non-200 responses as required by EventSource
+  response processing.
+- `Writer` now rejects invalid UTF-8 before writing, so it cannot emit an event
+  stream that violates the protocol's UTF-8 requirement.
+
+### Tests
+
+- Protocol vectors now cover the WHATWG examples and Web Platform Tests field
+  parsing/BOM cases, malformed UTF-8, field state transitions, EOF behavior,
+  MIME/status validation, size limits, and transport failures.
+- The package test suite reaches 100% statement coverage.
+
 ## [0.0.2] - 2026-07-10
 
 This release is a breaking redesign of the v0.0.1 API into a small, reliable
@@ -51,3 +84,5 @@ Initial release.
 
 [0.0.2]: https://github.com/Tangerg/sse/releases/tag/v0.0.2
 [0.0.1]: https://github.com/Tangerg/sse/releases/tag/v0.0.1
+[Unreleased]: https://github.com/Tangerg/sse/compare/v0.0.3...HEAD
+[0.0.3]: https://github.com/Tangerg/sse/compare/v0.0.2...v0.0.3

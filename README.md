@@ -11,7 +11,7 @@ reconnection and request retries are the caller's responsibility.
 
 ## Requirements
 
-Go 1.26 or later.
+Go 1.23 or later.
 
 ## Installation
 
@@ -28,13 +28,9 @@ client immediately:
 
 ```go
 func handler(w http.ResponseWriter, r *http.Request) {
-    sw, err := sse.NewHTTPWriter(w)
-    if err != nil {
-        http.Error(w, err.Error(), http.StatusInternalServerError)
-        return
-    }
+    sw := sse.NewHTTPWriter(w)
 
-    if err := sw.Message(sse.Message{
+    if err := sw.Write(sse.Message{
         ID:    "1",
         Event: "update",
         Data:  []byte("hello world"),
@@ -63,17 +59,20 @@ that wraps the `ResponseWriter`.
 ```go
 sw := sse.NewWriter(w)
 
-err := sw.Message(sse.Message{
+if err := sw.Retry(5 * time.Second); err != nil {
+    return err
+}
+err := sw.Write(sse.Message{
     Event: "ping",
     Data:  []byte("{}"),
-    Retry: 5 * time.Second,
 })
 ```
 
-Every `Message` call emits a dispatchable event — a single `data:` line is
+Every `Write` call emits a dispatchable event — a single `data:` line is
 written even when `Data` is empty, so an event carrying only a type (e.g. a
-refresh signal) is expressible. An `ID` containing CR, LF, or NUL, or an `Event`
-containing CR or LF, is rejected with an error rather than silently altered.
+refresh signal) is expressible. All fields must be valid UTF-8. An `ID`
+containing CR, LF, or NUL, or an `Event` containing CR or LF, is rejected with
+an error rather than silently altered.
 
 `Retry` and `ResetID` emit standalone control frames — a new reconnection time,
 or a reset of the last event ID — without dispatching an event:
@@ -87,8 +86,8 @@ sw.ResetID()               // id:
 
 ### HTTP client
 
-`NewHTTPReader` validates the response media type (with `mime.ParseMediaType`)
-before parsing:
+`NewHTTPReader` validates the 200 response status and response media type (with
+`mime.ParseMediaType`) before parsing:
 
 ```go
 resp, err := http.Get("https://example.com/events")
@@ -106,9 +105,10 @@ for msg, err := range sr.Messages() {
 }
 ```
 
-A clean end of stream ends the loop without an error; a non-nil error means an
-I/O failure, a line exceeding the buffer limit, or `ErrEventTooLarge`. There is
-no context parameter: to interrupt a read blocked on a stalled connection, close
+A clean end of stream ends the loop without an error; malformed UTF-8 is decoded
+as `U+FFFD` per the Encoding Standard. A non-nil error means an I/O failure, a
+line exceeding the buffer limit, or `ErrEventTooLarge`. There is no context
+parameter: to interrupt a read blocked on a stalled connection, close
 `resp.Body`; to stop consuming, break out of the loop.
 
 After the loop ends, `LastEventID()` and `Retry()` report the reconnection state
@@ -158,7 +158,7 @@ yields `ErrEventTooLarge`.
 
 ```go
 payload, _ := json.Marshal(OrderEvent{OrderID: "ord_123", Status: "shipped"})
-sw.Message(sse.Message{ID: "1", Event: "order.updated", Data: payload})
+sw.Write(sse.Message{ID: "1", Event: "order.updated", Data: payload})
 
 for msg, err := range sr.Messages() {
     if err != nil { log.Fatal(err) }
@@ -174,7 +174,6 @@ type Message struct {
     ID    string
     Event string
     Data  []byte
-    Retry time.Duration
 }
 
 func NewReader(r io.Reader) *Reader
@@ -186,8 +185,8 @@ func (r *Reader) Retry() (time.Duration, bool)
 // Reader.MaxEventBytes int — per-event data limit; 0 means unlimited.
 
 func NewWriter(w io.Writer) *Writer
-func NewHTTPWriter(rw http.ResponseWriter) (*Writer, error)
-func (w *Writer) Message(msg Message) error
+func NewHTTPWriter(rw http.ResponseWriter) *Writer
+func (w *Writer) Write(msg Message) error
 func (w *Writer) Comment(comment string) error
 func (w *Writer) Retry(delay time.Duration) error
 func (w *Writer) ResetID() error
@@ -198,7 +197,6 @@ func (w *Writer) ResetID() error
 | `ID`    | `id`      | Last-event-ID. Persists across events on read; received values containing NUL are ignored. On write an empty ID omits the line. |
 | `Event` | `event`   | Defaults to `"message"` when absent. On write an empty value omits the line. |
 | `Data`  | `data`    | Multi-line values are one `data:` line each; joined with LF on read. An empty `Data` still emits one `data:` line so the event dispatches. |
-| `Retry` | `retry`   | Stream-level reconnection time. On read it persists across events once set (§9.2.6) and is reported on every message. On write a positive value emits a `retry:` line. |
 
 ## Spec compliance
 
@@ -208,6 +206,7 @@ Implements the core parsing/serialisation of WHATWG HTML Living Standard §9.2:
 | Requirement | §9.2 reference |
 |---|---|
 | Leading UTF-8 BOM stripped once | §9.2.6 |
+| Malformed UTF-8 decoded with U+FFFD replacement | §9.2.6 / Encoding Standard |
 | All three line endings: LF, CR, CRLF | §9.2.5 `end-of-line` |
 | One leading space after `:` stripped from values | §9.2.6 |
 | `id` values containing NUL ignored on read; rejected on write | §9.2.6 |
@@ -216,11 +215,11 @@ Implements the core parsing/serialisation of WHATWG HTML Living Standard §9.2:
 | Events with an empty data buffer discarded on read | §9.2.6 |
 | Last-event-ID and retry persist across events | §9.2.6 |
 | Incomplete final event (no trailing blank line) discarded | §9.2.6 |
-| Media type `text/event-stream` enforced on read | §9.2.5 |
+| HTTP 200 status and media type `text/event-stream` enforced on read | §9.2.3 / §9.2.5 |
 
-Not implemented (out of scope): EventSource reconnection, and the UTF-8 decode
-step that replaces malformed byte sequences with U+FFFD — bytes pass through
-unchanged.
+Not implemented (out of scope): EventSource connection establishment and
+automatic reconnection. The package exposes the parsed last-event ID and retry
+delay so callers can implement that policy themselves.
 
 ## License
 

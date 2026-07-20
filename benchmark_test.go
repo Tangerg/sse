@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"strings"
 	"testing"
-	"time"
 )
 
 // Benchmarks validate suspected hot paths. Run with:
@@ -20,7 +19,7 @@ var readerSmallEventsInput = strings.Repeat("data: hello\n\n", 1000)
 func BenchmarkReader_SmallEvents(b *testing.B) {
 	b.SetBytes(int64(len(readerSmallEventsInput)))
 	b.ReportAllocs()
-	for b.Loop() {
+	for range b.N {
 		sr := NewReader(strings.NewReader(readerSmallEventsInput))
 		for _, err := range sr.Messages() {
 			if err != nil {
@@ -36,7 +35,7 @@ var readerAllFieldsInput = strings.Repeat(
 func BenchmarkReader_AllFields(b *testing.B) {
 	b.SetBytes(int64(len(readerAllFieldsInput)))
 	b.ReportAllocs()
-	for b.Loop() {
+	for range b.N {
 		sr := NewReader(strings.NewReader(readerAllFieldsInput))
 		for _, err := range sr.Messages() {
 			if err != nil {
@@ -52,7 +51,7 @@ var readerMultilineDataInput = strings.Repeat(
 func BenchmarkReader_MultilineData(b *testing.B) {
 	b.SetBytes(int64(len(readerMultilineDataInput)))
 	b.ReportAllocs()
-	for b.Loop() {
+	for range b.N {
 		sr := NewReader(strings.NewReader(readerMultilineDataInput))
 		for _, err := range sr.Messages() {
 			if err != nil {
@@ -69,7 +68,7 @@ var readerLargeDataInput = "data: " + strings.Repeat("x", 256*1024) + "\n\n"
 func BenchmarkReader_LargeData(b *testing.B) {
 	b.SetBytes(int64(len(readerLargeDataInput)))
 	b.ReportAllocs()
-	for b.Loop() {
+	for range b.N {
 		sr := NewReader(strings.NewReader(readerLargeDataInput))
 		sr.MaxLineBytes = 512 * 1024
 		for _, err := range sr.Messages() {
@@ -85,7 +84,7 @@ var readerWithBOMInput = "\uFEFF" + readerSmallEventsInput
 func BenchmarkReader_WithBOM(b *testing.B) {
 	b.SetBytes(int64(len(readerWithBOMInput)))
 	b.ReportAllocs()
-	for b.Loop() {
+	for range b.N {
 		sr := NewReader(strings.NewReader(readerWithBOMInput))
 		for _, err := range sr.Messages() {
 			if err != nil {
@@ -102,9 +101,9 @@ func BenchmarkWriter_SmallMessage(b *testing.B) {
 	var buf bytes.Buffer
 	w := NewWriter(&buf)
 	b.ReportAllocs()
-	for b.Loop() {
+	for range b.N {
 		buf.Reset()
-		if err := w.Message(msg); err != nil {
+		if err := w.Write(msg); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -116,14 +115,13 @@ func BenchmarkWriter_AllFields(b *testing.B) {
 		ID:    "1",
 		Event: "update",
 		Data:  []byte("hello world"),
-		Retry: 3 * time.Second,
 	}
 	var buf bytes.Buffer
 	w := NewWriter(&buf)
 	b.ReportAllocs()
-	for b.Loop() {
+	for range b.N {
 		buf.Reset()
-		if err := w.Message(msg); err != nil {
+		if err := w.Write(msg); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -135,9 +133,9 @@ func BenchmarkWriter_MultilineData(b *testing.B) {
 	var buf bytes.Buffer
 	w := NewWriter(&buf)
 	b.ReportAllocs()
-	for b.Loop() {
+	for range b.N {
 		buf.Reset()
-		if err := w.Message(msg); err != nil {
+		if err := w.Write(msg); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -151,9 +149,9 @@ func BenchmarkWriter_LargeData(b *testing.B) {
 	var buf bytes.Buffer
 	w := NewWriter(&buf)
 	b.ReportAllocs()
-	for b.Loop() {
+	for range b.N {
 		buf.Reset()
-		if err := w.Message(msg); err != nil {
+		if err := w.Write(msg); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -164,7 +162,7 @@ func BenchmarkWriter_Comment(b *testing.B) {
 	var buf bytes.Buffer
 	w := NewWriter(&buf)
 	b.ReportAllocs()
-	for b.Loop() {
+	for range b.N {
 		buf.Reset()
 		if err := w.Comment("heartbeat"); err != nil {
 			b.Fatal(err)
@@ -190,7 +188,7 @@ func BenchmarkSplitLine(b *testing.B) {
 			data := tc.data
 			atEOF := tc.name == "no terminator atEOF"
 			b.ReportAllocs()
-			for b.Loop() {
+			for range b.N {
 				_, _, _ = splitLine(data, atEOF)
 			}
 		})

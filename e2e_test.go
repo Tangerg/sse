@@ -15,11 +15,7 @@ import (
 func serve(t *testing.T, setup func(w *sse.Writer)) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-		w, err := sse.NewHTTPWriter(rw)
-		if err != nil {
-			http.Error(rw, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		w := sse.NewHTTPWriter(rw)
 		setup(w)
 	}))
 }
@@ -55,7 +51,7 @@ func collectAll(t *testing.T, r *sse.Reader) []sse.Message {
 
 func TestE2E_SingleMessage(t *testing.T) {
 	srv := serve(t, func(w *sse.Writer) {
-		if err := w.Message(sse.Message{ID: "1", Event: "greet", Data: []byte("hello")}); err != nil {
+		if err := w.Write(sse.Message{ID: "1", Event: "greet", Data: []byte("hello")}); err != nil {
 			return
 		}
 	})
@@ -87,7 +83,7 @@ func TestE2E_MultipleMessages(t *testing.T) {
 
 	srv := serve(t, func(w *sse.Writer) {
 		for _, msg := range want {
-			if err := w.Message(msg); err != nil {
+			if err := w.Write(msg); err != nil {
 				return
 			}
 		}
@@ -108,18 +104,21 @@ func TestE2E_MultipleMessages(t *testing.T) {
 
 func TestE2E_AllFields(t *testing.T) {
 	srv := serve(t, func(w *sse.Writer) {
-		if err := w.Message(sse.Message{
+		if err := w.Retry(2 * time.Second); err != nil {
+			return
+		}
+		if err := w.Write(sse.Message{
 			ID:    "42",
 			Event: "update",
 			Data:  []byte("payload"),
-			Retry: 2 * time.Second,
 		}); err != nil {
 			return
 		}
 	})
 	defer srv.Close()
 
-	msgs := collectAll(t, connect(t, srv))
+	r := connect(t, srv)
+	msgs := collectAll(t, r)
 
 	if len(msgs) != 1 {
 		t.Fatalf("got %d messages, want 1", len(msgs))
@@ -134,14 +133,14 @@ func TestE2E_AllFields(t *testing.T) {
 	if string(m.Data) != "payload" {
 		t.Errorf("Data = %q, want %q", m.Data, "payload")
 	}
-	if m.Retry != 2*time.Second {
-		t.Errorf("Retry = %v, want %v", m.Retry, 2*time.Second)
+	if retry, ok := r.Retry(); !ok || retry != 2*time.Second {
+		t.Errorf("Retry() = (%v, %v), want (2s, true)", retry, ok)
 	}
 }
 
 func TestE2E_MultiLineData(t *testing.T) {
 	srv := serve(t, func(w *sse.Writer) {
-		if err := w.Message(sse.Message{Data: []byte("line1\nline2\nline3")}); err != nil {
+		if err := w.Write(sse.Message{Data: []byte("line1\nline2\nline3")}); err != nil {
 			return
 		}
 	})
@@ -162,7 +161,7 @@ func TestE2E_HeartbeatComment(t *testing.T) {
 		if err := w.Comment("heartbeat"); err != nil {
 			return
 		}
-		if err := w.Message(sse.Message{Data: []byte("after heartbeat")}); err != nil {
+		if err := w.Write(sse.Message{Data: []byte("after heartbeat")}); err != nil {
 			return
 		}
 	})
@@ -180,10 +179,10 @@ func TestE2E_HeartbeatComment(t *testing.T) {
 
 func TestE2E_IDPersistsAcrossEvents(t *testing.T) {
 	srv := serve(t, func(w *sse.Writer) {
-		if err := w.Message(sse.Message{ID: "7", Data: []byte("first")}); err != nil {
+		if err := w.Write(sse.Message{ID: "7", Data: []byte("first")}); err != nil {
 			return
 		}
-		if err := w.Message(sse.Message{Data: []byte("second")}); err != nil { // no id field
+		if err := w.Write(sse.Message{Data: []byte("second")}); err != nil { // no id field
 			return
 		}
 	})
@@ -206,14 +205,10 @@ func TestE2E_EarlyClientStop(t *testing.T) {
 	started := make(chan struct{})
 
 	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-		w, err := sse.NewHTTPWriter(rw)
-		if err != nil {
-			http.Error(rw, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		w := sse.NewHTTPWriter(rw)
 		close(started)
 		for {
-			if err := w.Message(sse.Message{Data: []byte("tick")}); err != nil {
+			if err := w.Write(sse.Message{Data: []byte("tick")}); err != nil {
 				return
 			}
 		}
@@ -268,7 +263,7 @@ func TestE2E_JSONData(t *testing.T) {
 			if err != nil {
 				return
 			}
-			if err := w.Message(sse.Message{
+			if err := w.Write(sse.Message{
 				ID:    string(rune('1' + i)),
 				Event: "order.updated",
 				Data:  data,

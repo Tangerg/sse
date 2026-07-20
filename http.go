@@ -12,8 +12,8 @@ import (
 // Reader and Writer, which themselves depend only on io. Keeping the HTTP glue
 // here lets the core codec stay free of net/http concerns.
 
-// NewHTTPReader returns a Reader that parses resp.Body after verifying that the
-// response's Content-Type media type is text/event-stream (§9.2.5).
+// NewHTTPReader returns a Reader that parses resp.Body after verifying a 200 OK
+// response with the text/event-stream media type (§9.2.3 and §9.2.5).
 func NewHTTPReader(resp *http.Response) (*Reader, error) {
 	if err := checkSSEResponse(resp); err != nil {
 		return nil, err
@@ -21,16 +21,19 @@ func NewHTTPReader(resp *http.Response) (*Reader, error) {
 	return NewReader(resp.Body), nil
 }
 
-// checkSSEResponse validates that resp advertises the SSE media type and has a
-// non-nil body. The Content-Type is parsed with mime.ParseMediaType so that
-// parameters (e.g. charset) and case are handled per RFC 2045 rather than by a
-// raw prefix match.
+// checkSSEResponse validates that resp has a successful EventSource status,
+// advertises the SSE media type, and has a non-nil body. The Content-Type is
+// parsed with mime.ParseMediaType so that parameters (e.g. charset) and case are
+// handled per RFC 2045 rather than by a raw prefix match.
 func checkSSEResponse(resp *http.Response) error {
 	if resp == nil {
 		return errors.New("sse: http.Response cannot be nil")
 	}
 	if resp.Body == nil {
 		return errors.New("sse: http.Response.Body cannot be nil")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("sse: HTTP status must be 200 OK, got %d", resp.StatusCode)
 	}
 	ct := resp.Header.Get("Content-Type")
 	if ct == "" {
@@ -48,20 +51,20 @@ func checkSSEResponse(resp *http.Response) error {
 
 // NewHTTPWriter returns a Writer for an HTTP response. It sets the SSE response
 // headers and flushes after every write so each event reaches the client
-// immediately.
+// immediately. It panics if rw is nil.
 //
 // Flushing uses http.ResponseController, which unwraps middleware that wraps the
 // ResponseWriter. If the underlying writer does not support flushing, the error
-// surfaces from the first Message or Comment call rather than here.
-func NewHTTPWriter(rw http.ResponseWriter) (*Writer, error) {
+// surfaces from the first Write or Comment call rather than here.
+func NewHTTPWriter(rw http.ResponseWriter) *Writer {
 	if rw == nil {
-		return nil, errors.New("sse: http.ResponseWriter cannot be nil")
+		panic("sse: http.ResponseWriter cannot be nil")
 	}
 	setSSEHeaders(rw.Header())
 	return NewWriter(&flushWriter{
 		rw: rw,
 		rc: http.NewResponseController(rw),
-	}), nil
+	})
 }
 
 // flushWriter flushes the response after every write. SSE connections are

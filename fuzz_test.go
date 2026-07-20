@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // FuzzReader checks that parsing arbitrary bytes never panics and always
@@ -79,7 +80,7 @@ func FuzzChunking(f *testing.F) {
 			if err != nil {
 				return b.String(), err
 			}
-			fmt.Fprintf(&b, "id=%q event=%q data=%q retry=%d\n", msg.ID, msg.Event, msg.Data, msg.Retry)
+			fmt.Fprintf(&b, "id=%q event=%q data=%q\n", msg.ID, msg.Event, msg.Data)
 		}
 		d, ok := r.Retry()
 		fmt.Fprintf(&b, "final: lastID=%q retry=%d,%t", r.LastEventID(), d, ok)
@@ -126,8 +127,18 @@ func FuzzRoundTrip(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		var buf bytes.Buffer
 		w := NewWriter(&buf)
-		if err := w.Message(Message{Data: data}); err != nil {
-			t.Fatalf("Message: %v", err)
+		err := w.Write(Message{Data: data})
+		if !utf8.Valid(data) {
+			if err == nil {
+				t.Fatal("Write accepted invalid UTF-8")
+			}
+			if buf.Len() != 0 {
+				t.Fatalf("Write produced %q for invalid UTF-8", buf.Bytes())
+			}
+			return
+		}
+		if err != nil {
+			t.Fatalf("Write: %v", err)
 		}
 
 		r := NewReader(&buf)

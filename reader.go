@@ -10,6 +10,7 @@ import (
 	"math"
 	"strconv"
 	"time"
+	"unicode/utf8"
 )
 
 // defaultMaxLineBytes matches the default maximum token size of bufio.Scanner.
@@ -24,15 +25,18 @@ const maxRetryMS = uint64(math.MaxInt64 / int64(time.Millisecond))
 // exceeds Reader.MaxEventBytes.
 var ErrEventTooLarge = errors.New("sse: event too large")
 
+var errLineTooLong = errors.New("sse: line exceeds MaxLineBytes")
+
 // Reader parses an SSE event stream (§9.2.6), yielding one Message per
 // blank-line dispatch boundary.
 //
 // A Reader is not safe for concurrent use.
 type Reader struct {
-	// MaxLineBytes caps the size in bytes of a single line (one field). A value
-	// of zero or less uses the 64 KiB default. It must be set before the first
-	// call to Messages; later changes have no effect. Raise it when a single
-	// data field may exceed 64 KiB (e.g. a large JSON payload).
+	// MaxLineBytes caps the size in bytes of a single line (one field), excluding
+	// its CR/LF terminator. A value of zero or less uses the 64 KiB default. It
+	// must be set before the first call to Messages; later changes have no effect.
+	// Raise it when a single data field may exceed 64 KiB (e.g. a large JSON
+	// payload).
 	MaxLineBytes int
 
 	// MaxEventBytes caps the total data buffered for a single event across all
@@ -44,6 +48,7 @@ type Reader struct {
 	r       io.Reader
 	scanner *bufio.Scanner
 	err     error // terminal error: once set, parsing never resumes
+	maxLine int   // effective MaxLineBytes captured when scanner is created
 
 	// Dispatch state (§9.2.6). idBuffer is the last-event-ID buffer, updated as
 	// soon as an id field is parsed. lastEventID is the "last event ID string",
@@ -138,12 +143,26 @@ func (r *Reader) Messages() iter.Seq2[Message, error] {
 			}
 			sc := bufio.NewScanner(stripped)
 			sc.Split(splitLine)
-			sc.Buffer(make([]byte, 0, min(4096, max)), max)
+			// Scanner needs room beyond the token for EOF detection or a CRLF
+			// terminator. Keep that framing overhead separate from the advertised
+			// line limit, which applies only to the token bytes.
+			scannerMax := max
+			if max <= int(^uint(0)>>1)-2 {
+				scannerMax += 2
+			}
+			sc.Buffer(make([]byte, 0, min(4096, scannerMax)), scannerMax)
 			r.scanner = sc
+			r.maxLine = max
 		}
 
 		for r.scanner.Scan() {
 			line := r.scanner.Bytes()
+			if len(line) > r.maxLine {
+				r.err = errLineTooLong
+				yield(Message{}, r.err)
+				return
+			}
+			line = decodeUTF8(line)
 			if len(line) == 0 {
 				if msg, ok := r.dispatch(); ok {
 					if !yield(msg, nil) {
@@ -164,6 +183,90 @@ func (r *Reader) Messages() iter.Seq2[Message, error] {
 			yield(Message{}, err)
 		}
 	}
+}
+
+// decodeUTF8 applies the Encoding Standard's UTF-8 decoder in replacement
+// mode to one complete SSE line. Valid input is returned without allocation;
+// malformed subsequences are replaced with U+FFFD.
+//
+// Decoding line by line is equivalent to decoding the stream first because CR
+// and LF are ASCII bytes: neither can occur in a valid multi-byte sequence, and
+// the decoder reprocesses either byte as a line ending after an error.
+func decodeUTF8(p []byte) []byte {
+	if utf8.Valid(p) {
+		return p
+	}
+
+	out := make([]byte, 0, len(p))
+	var seq [utf8.UTFMax]byte
+	var seqLen, bytesSeen, bytesNeeded int
+	lower, upper := byte(0x80), byte(0xbf)
+
+	reset := func() {
+		seqLen, bytesSeen, bytesNeeded = 0, 0, 0
+		lower, upper = 0x80, 0xbf
+	}
+	replacement := func() {
+		out = append(out, "\uFFFD"...)
+		reset()
+	}
+
+	for i := 0; i < len(p); {
+		b := p[i]
+		if bytesNeeded == 0 {
+			switch {
+			case b <= 0x7f:
+				out = append(out, b)
+				i++
+			case b >= 0xc2 && b <= 0xdf:
+				seq[0], seqLen, bytesNeeded = b, 1, 1
+				i++
+			case b >= 0xe0 && b <= 0xef:
+				seq[0], seqLen, bytesNeeded = b, 1, 2
+				if b == 0xe0 {
+					lower = 0xa0
+				}
+				if b == 0xed {
+					upper = 0x9f
+				}
+				i++
+			case b >= 0xf0 && b <= 0xf4:
+				seq[0], seqLen, bytesNeeded = b, 1, 3
+				if b == 0xf0 {
+					lower = 0x90
+				}
+				if b == 0xf4 {
+					upper = 0x8f
+				}
+				i++
+			default:
+				replacement()
+				i++
+			}
+			continue
+		}
+
+		if b < lower || b > upper {
+			// Do not consume b: the decoder restores the offending byte to the
+			// input queue and processes it again from the initial state.
+			replacement()
+			continue
+		}
+		lower, upper = 0x80, 0xbf
+		seq[seqLen] = b
+		seqLen++
+		bytesSeen++
+		i++
+		if bytesSeen == bytesNeeded {
+			out = append(out, seq[:seqLen]...)
+			reset()
+		}
+	}
+
+	if bytesNeeded != 0 {
+		replacement()
+	}
+	return out
 }
 
 // parseLine applies the §9.2.6 per-line rules to one non-empty line, updating
@@ -282,6 +385,5 @@ func (r *Reader) dispatch() (Message, bool) {
 		ID:    r.lastEventID,
 		Event: event,
 		Data:  data,
-		Retry: r.retry,
 	}, true
 }

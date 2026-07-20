@@ -153,6 +153,34 @@ func TestSpec_IDWithEmptyValueAfterColon(t *testing.T) {
 	}
 }
 
+// TestSpec_NULLIDPreservesPreviousValue verifies that a NULL-containing id is
+// ignored rather than resetting or replacing the last-event-ID buffer.
+func TestSpec_NULLIDPreservesPreviousValue(t *testing.T) {
+	in := "id: before\ndata: first\n\nid: bad\x00id\ndata: second\n\n"
+	msgs, err := collectMessages(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("got %d messages, want 2", len(msgs))
+	}
+	if msgs[1].ID != "before" {
+		t.Errorf("second ID = %q, want %q", msgs[1].ID, "before")
+	}
+}
+
+// TestSpec_LaterIDWins verifies that fields are processed in arrival order, so
+// the final id field before dispatch supplies the event's lastEventId.
+func TestSpec_LaterIDWins(t *testing.T) {
+	msgs, err := collectMessages("id: first\nid: second\ndata: x\n\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || msgs[0].ID != "second" {
+		t.Errorf("got %v, want one message with ID=second", msgs)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // §9.2.6 — retry field edge cases
 // ---------------------------------------------------------------------------
@@ -176,15 +204,16 @@ func TestSpec_RetryRequiresOnlyDigits(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			msgs, err := collectMessages(tc.line + "data: x\n\n")
+			r := NewReader(strings.NewReader(tc.line + "data: x\n\n"))
+			msgs, err := collectAllFrom(r)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if len(msgs) != 1 {
 				t.Fatalf("got %d messages, want 1", len(msgs))
 			}
-			if msgs[0].Retry != 0 {
-				t.Errorf("Retry = %v, want 0 (invalid value must be ignored)", msgs[0].Retry)
+			if retry, ok := r.Retry(); ok {
+				t.Errorf("Retry() = (%v, %v), want (_, false)", retry, ok)
 			}
 		})
 	}
@@ -193,32 +222,64 @@ func TestSpec_RetryRequiresOnlyDigits(t *testing.T) {
 // TestSpec_RetryAcceptsLeadingZeros verifies that a digits-only value is
 // interpreted in base ten, which permits leading zeros.
 func TestSpec_RetryAcceptsLeadingZeros(t *testing.T) {
-	msgs, err := collectMessages("retry: 003000\ndata: x\n\n")
-	if err != nil {
+	r := NewReader(strings.NewReader("retry: 003000\ndata: x\n\n"))
+	if _, err := collectAllFrom(r); err != nil {
 		t.Fatal(err)
 	}
-	if msgs[0].Retry != 3*time.Second {
-		t.Errorf("Retry = %v, want 3s", msgs[0].Retry)
+	if retry, ok := r.Retry(); !ok || retry != 3*time.Second {
+		t.Errorf("Retry() = (%v, %v), want (3s, true)", retry, ok)
 	}
 }
 
 // TestSpec_RetryPersistsAcrossEvents verifies that the reconnection time is
 // stream-level state: unlike the data and event-type buffers it is NOT reset at
-// dispatch, so it is reported on every subsequent event (§9.2.6 — dispatch
-// resets only the data and event-type buffers).
+// dispatch (§9.2.6 — dispatch resets only the data and event-type buffers).
 func TestSpec_RetryPersistsAcrossEvents(t *testing.T) {
-	msgs, err := collectMessages("retry: 5000\ndata: first\n\ndata: second\n\n")
-	if err != nil {
+	r := NewReader(strings.NewReader("retry: 5000\ndata: first\n\ndata: second\n\n"))
+	var count int
+	for _, err := range r.Messages() {
+		if err != nil {
+			t.Fatal(err)
+		}
+		count++
+		if retry, ok := r.Retry(); !ok || retry != 5*time.Second {
+			t.Errorf("event %d: Retry() = (%v, %v), want (5s, true)", count, retry, ok)
+		}
+	}
+	if count != 2 {
+		t.Fatalf("got %d messages, want 2", count)
+	}
+}
+
+func TestSpec_InvalidRetryPreservesPreviousValue(t *testing.T) {
+	r := NewReader(strings.NewReader("retry: 1000\nretry: invalid\ndata: x\n\n"))
+	if _, err := collectAllFrom(r); err != nil {
 		t.Fatal(err)
 	}
-	if len(msgs) != 2 {
-		t.Fatalf("got %d messages, want 2", len(msgs))
+	if retry, ok := r.Retry(); !ok || retry != time.Second {
+		t.Errorf("Retry() = (%v, %v), want (1s, true)", retry, ok)
 	}
-	if msgs[0].Retry != 5*time.Second {
-		t.Errorf("msgs[0].Retry = %v, want 5s", msgs[0].Retry)
+}
+
+func TestSpec_RetryZeroIsSet(t *testing.T) {
+	r := NewReader(strings.NewReader("retry: 0\n"))
+	if _, err := collectAllFrom(r); err != nil {
+		t.Fatal(err)
 	}
-	if msgs[1].Retry != 5*time.Second {
-		t.Errorf("msgs[1].Retry = %v, want 5s (retry persists across events)", msgs[1].Retry)
+	if retry, ok := r.Retry(); !ok || retry != 0 {
+		t.Errorf("Retry() = (%v, %v), want (0, true)", retry, ok)
+	}
+}
+
+// Field processing is not conditional on dispatch: a retry line immediately
+// before EOF still updates the stream's reconnection time.
+func TestSpec_TrailingRetryAtEOFIsProcessed(t *testing.T) {
+	r := NewReader(strings.NewReader("retry: 2500"))
+	if _, err := collectAllFrom(r); err != nil {
+		t.Fatal(err)
+	}
+	if retry, ok := r.Retry(); !ok || retry != 2500*time.Millisecond {
+		t.Errorf("Retry() = (%v, %v), want (2.5s, true)", retry, ok)
 	}
 }
 
@@ -257,6 +318,29 @@ func TestSpec_EventTypeOverwrittenWithinEvent(t *testing.T) {
 	}
 }
 
+func TestSpec_EmptyEventFieldRestoresDefault(t *testing.T) {
+	msgs, err := collectMessages("event: custom\nevent:\ndata: x\n\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || msgs[0].Event != defaultEvent {
+		t.Errorf("got %v, want one default message event", msgs)
+	}
+}
+
+func TestSpec_FieldOrderDoesNotAffectDispatch(t *testing.T) {
+	msgs, err := collectMessages("data: x\nevent: custom\nid: 7\n\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("got %d messages, want 1", len(msgs))
+	}
+	if got := msgs[0]; got.ID != "7" || got.Event != "custom" || string(got.Data) != "x" {
+		t.Errorf("message = %+v, want ID=7 Event=custom Data=x", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // §9.2.5 — line endings and BOM rules
 // ---------------------------------------------------------------------------
@@ -292,6 +376,60 @@ func TestSpec_BOMOnlyStrippedAtStart(t *testing.T) {
 	}
 	if got := string(msgs[0].Data); got != "a\uFEFFb" {
 		t.Errorf("data = %q, want %q (interior BOM must be preserved)", got, "a\uFEFFb")
+	}
+}
+
+// TestSpec_DoubleBOMStripsOnlyOne mirrors WPT format-bom-2.any.js. The second
+// BOM becomes part of the first field name, so that data field is ignored.
+func TestSpec_DoubleBOMStripsOnlyOne(t *testing.T) {
+	in := "\uFEFF\uFEFFdata: first\n\ndata: second\n\ndata: trailing"
+	msgs, err := collectMessages(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || string(msgs[0].Data) != "second" {
+		t.Errorf("got %v, want only the second event", msgs)
+	}
+}
+
+// TestSpec_WPTFieldParsing ports the Web Platform Tests field-parsing vector.
+// It covers NULL data, literal/case-sensitive field names, mixed line endings,
+// the first-colon split, the single-space rule, and empty data fields together.
+func TestSpec_WPTFieldParsing(t *testing.T) {
+	in := "data:\x00\n" +
+		"data:  2\r" +
+		"Data:1\n" +
+		"data\x00:2\n" +
+		"data:1\r" +
+		"\x00data:4\n" +
+		"da-ta:3\r" +
+		"data_5\n" +
+		"data:3\r" +
+		"data:\r\n" +
+		" data:32\n" +
+		"data:4\n\n"
+	msgs, err := collectMessages(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("got %d messages, want 1", len(msgs))
+	}
+	if got, want := string(msgs[0].Data), "\x00\n 2\n1\n3\n\n4"; got != want {
+		t.Errorf("data = %q, want %q", got, want)
+	}
+}
+
+// Streams are decoded using the Encoding Standard's UTF-8 decoder, whose
+// replacement mode emits one U+FFFD for this malformed subsequence before
+// reprocessing the following ASCII byte.
+func TestSpec_MalformedUTF8UsesReplacementDecoder(t *testing.T) {
+	msgs, err := collectMessages(string([]byte("data: \xe1\x80A\n\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || string(msgs[0].Data) != "�A" {
+		t.Errorf("got %v, want one message with data=%q", msgs, "�A")
 	}
 }
 
@@ -464,7 +602,7 @@ func TestSpec_WriterRejectsCRLFInIDAndEvent(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			w := NewWriter(&strings.Builder{})
-			if err := w.Message(tc.msg); err == nil {
+			if err := w.Write(tc.msg); err == nil {
 				t.Errorf("expected error for %s, got nil", tc.name)
 			}
 		})
@@ -494,7 +632,7 @@ func TestSpec_WriterCommentSyntax(t *testing.T) {
 // emitting one would be silently lossy; the writer errors instead.
 func TestSpec_WriterRejectsNULLInID(t *testing.T) {
 	w := NewWriter(&strings.Builder{})
-	if err := w.Message(Message{ID: "bad\x00id", Data: []byte("hello")}); err == nil {
+	if err := w.Write(Message{ID: "bad\x00id", Data: []byte("hello")}); err == nil {
 		t.Error("expected error for NULL-containing id, got nil")
 	}
 }

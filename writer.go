@@ -2,11 +2,13 @@ package sse
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Writer serialises Message values and comment lines to an io.Writer using the
@@ -27,7 +29,7 @@ func NewWriter(w io.Writer) *Writer {
 	return &Writer{w: w}
 }
 
-// Message encodes msg as one SSE event frame and writes it with a single Write
+// Write encodes msg as one SSE event frame and writes it with a single Write
 // call to the underlying writer.
 //
 // The frame is a sequence of "name: value" lines terminated by a blank line
@@ -35,21 +37,25 @@ func NewWriter(w io.Writer) *Writer {
 // always emitted — even for empty Data — so the event is dispatched; an event
 // carrying only a type is therefore expressible.
 //
-// Message returns an error, and writes nothing, if ID contains CR, LF, or NUL,
-// if Event contains CR or LF, or if Retry is negative: those inputs would
-// corrupt the framing, be dropped by a conforming receiver, or be nonsensical,
-// so they are rejected rather than silently altered or omitted. A zero Retry
-// omits the field (consistent with [Writer.Retry], which rejects a negative
-// delay).
-func (w *Writer) Message(msg Message) error {
+// Write returns an error, and writes nothing, if any field is not valid UTF-8,
+// if ID contains CR, LF, or NUL, or if Event contains CR or LF. Those inputs
+// would violate the event-stream encoding, corrupt the framing, or be dropped
+// by a conforming receiver, so they are rejected rather than silently altered.
+func (w *Writer) Write(msg Message) error {
+	if !utf8.ValidString(msg.ID) {
+		return errors.New("sse: message ID is not valid UTF-8")
+	}
 	if strings.ContainsAny(msg.ID, "\r\n\x00") {
 		return fmt.Errorf("sse: message ID contains CR, LF, or NUL: %q", msg.ID)
+	}
+	if !utf8.ValidString(msg.Event) {
+		return errors.New("sse: event type is not valid UTF-8")
 	}
 	if strings.ContainsAny(msg.Event, "\r\n") {
 		return fmt.Errorf("sse: event type contains CR or LF: %q", msg.Event)
 	}
-	if msg.Retry < 0 {
-		return fmt.Errorf("sse: message Retry must not be negative: %v", msg.Retry)
+	if !utf8.Valid(msg.Data) {
+		return errors.New("sse: message data is not valid UTF-8")
 	}
 
 	w.buf.Reset()
@@ -60,9 +66,6 @@ func (w *Writer) Message(msg Message) error {
 		writeField(&w.buf, fieldEvent, msg.Event)
 	}
 	writeData(&w.buf, msg.Data)
-	if msg.Retry > 0 {
-		writeField(&w.buf, fieldRetry, strconv.FormatInt(ceilMillis(msg.Retry), 10))
-	}
 	w.buf.WriteString(lf)
 
 	return w.writeFrame(w.buf.Bytes())
@@ -128,6 +131,9 @@ func ceilMillis(d time.Duration) int64 {
 // string writes a bare ":" line, the minimal heartbeat. A multi-line comment is
 // split into one ":" line per line so it cannot corrupt the framing.
 func (w *Writer) Comment(comment string) error {
+	if !utf8.ValidString(comment) {
+		return errors.New("sse: comment is not valid UTF-8")
+	}
 	w.buf.Reset()
 	writeComment(&w.buf, comment)
 	return w.writeFrame(w.buf.Bytes())

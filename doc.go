@@ -5,10 +5,10 @@
 // The package covers the core parsing and serialisation rules of §9.2: BOM
 // stripping, all three line endings (LF, CR, CRLF), the four fields (data,
 // event, id, retry), the single-leading-space rule, id/retry validation, and
-// blank-line dispatch. It does not implement the full HTML EventSource client
-// (automatic reconnection, request retries, or the UTF-8 decode algorithm's
-// replacement of malformed sequences with U+FFFD — bytes pass through
-// unchanged), which are the caller's responsibility.
+// blank-line dispatch. Malformed UTF-8 is decoded with U+FFFD replacement per
+// the Encoding Standard. The package does not implement the full HTML
+// EventSource client (connection establishment, automatic reconnection, or
+// request retries), which remains the caller's responsibility.
 //
 // # Reading
 //
@@ -26,12 +26,13 @@
 //	    fmt.Println(msg.Event, string(msg.Data))
 //	}
 //
-// [NewHTTPReader] validates the response media type; for any other source use
-// [NewReader]. There is no context parameter: to interrupt a read blocked on a
-// stalled connection, close the underlying reader; to stop early, break the
-// loop. When a single data field may exceed 64 KiB (e.g. a large JSON payload),
-// raise [Reader.MaxLineBytes] before the first call to Messages; for untrusted
-// input, set [Reader.MaxEventBytes] to bound the total size of one event.
+// [NewHTTPReader] validates the response's 200 status and media type; for any
+// other source use [NewReader]. There is no context parameter: to interrupt a
+// read blocked on a stalled connection, close the underlying reader; to stop
+// early, break the loop. When a single data field may exceed 64 KiB (e.g. a
+// large JSON payload), raise [Reader.MaxLineBytes] before the first call to
+// Messages; for untrusted input, set [Reader.MaxEventBytes] to bound the total
+// size of one event.
 //
 // After the loop ends, [Reader.LastEventID] and [Reader.Retry] report the
 // reconnection state needed to reconnect — including values from standalone
@@ -43,20 +44,16 @@
 // and flushes each frame to the client:
 //
 //	func handler(w http.ResponseWriter, r *http.Request) {
-//	    sw, err := sse.NewHTTPWriter(w)
-//	    if err != nil {
-//	        http.Error(w, err.Error(), http.StatusInternalServerError)
-//	        return
-//	    }
-//	    sw.Message(sse.Message{Event: "update", Data: []byte("hello")})
+//	    sw := sse.NewHTTPWriter(w)
+//	    sw.Write(sse.Message{Event: "update", Data: []byte("hello")})
 //	    sw.Comment("keep-alive") // heartbeat (§9.2.7)
 //	}
 //
-// Every [Writer.Message] call emits a dispatchable event, including a "data:"
+// Every [Writer.Write] call emits a dispatchable event, including a "data:"
 // line even when Data is empty, so an event carrying only a type is
-// expressible. An ID containing CR, LF, or NUL, or an event type containing CR
-// or LF, is rejected with an error rather than silently altered. For non-HTTP
-// destinations use [NewWriter].
+// expressible. All fields must be valid UTF-8. An ID containing CR, LF, or NUL,
+// or an event type containing CR or LF, is rejected with an error rather than
+// silently altered. For non-HTTP destinations use [NewWriter].
 //
 // [Writer.Retry] and [Writer.ResetID] emit standalone control frames — a new
 // reconnection time or a reset of the last event ID — without dispatching an
@@ -65,7 +62,6 @@
 // # Retry
 //
 // Per §9.2.6 the retry (reconnection) time is stream-level state, not a
-// per-event field: once a stream sets it, [Message.Retry] reports the same value
-// on every subsequent event until the stream changes it. Writing a positive
-// [Message.Retry] emits a retry line that the receiver keeps until updated.
+// per-event field. [Reader.Retry] reports the current value and [Writer.Retry]
+// changes it without dispatching an event.
 package sse
