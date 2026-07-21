@@ -22,10 +22,12 @@ const defaultMaxLineBytes = 64 * 1024
 const maxRetryMS = uint64(math.MaxInt64 / int64(time.Millisecond))
 
 // ErrEventTooLarge is reported by Messages when a single event's buffered data
-// exceeds Reader.MaxEventBytes.
-var ErrEventTooLarge = errors.New("sse: event too large")
-
-var errLineTooLong = errors.New("sse: line exceeds MaxLineBytes")
+// exceeds Reader.MaxEventBytes; ErrLineTooLong when a single line exceeds
+// Reader.MaxLineBytes. Both are matchable with errors.Is.
+var (
+	ErrEventTooLarge = errors.New("sse: event too large")
+	ErrLineTooLong   = errors.New("sse: line exceeds MaxLineBytes")
+)
 
 // Reader parses an SSE event stream (§9.2.6), yielding one Message per
 // blank-line dispatch boundary.
@@ -114,8 +116,8 @@ func (r *Reader) LastEventID() string {
 // buffer is empty dispatches nothing and is skipped.
 //
 // The pair yielded on failure carries a zero Message and a non-nil error (an
-// I/O error, a line exceeding MaxLineBytes, or ErrEventTooLarge); the iterator
-// then stops. A clean end of stream (EOF) yields nothing — the loop simply
+// I/O error, ErrLineTooLong, or ErrEventTooLarge); the iterator then stops.
+// A clean end of stream (EOF) yields nothing — the loop simply
 // ends. Per §9.2.6, data left buffered at EOF without a trailing blank line is
 // discarded.
 //
@@ -131,43 +133,25 @@ func (r *Reader) Messages() iter.Seq2[Message, error] {
 			return
 		}
 		if r.scanner == nil {
-			stripped, err := stripBOM(r.r)
-			if err != nil {
+			if err := r.initScanner(); err != nil {
 				r.err = err
 				yield(Message{}, err)
 				return
 			}
-			max := r.MaxLineBytes
-			if max <= 0 {
-				max = defaultMaxLineBytes
-			}
-			sc := bufio.NewScanner(stripped)
-			sc.Split(splitLine)
-			// Scanner needs room beyond the token for EOF detection or a CRLF
-			// terminator. Keep that framing overhead separate from the advertised
-			// line limit, which applies only to the token bytes.
-			scannerMax := max
-			if max <= int(^uint(0)>>1)-2 {
-				scannerMax += 2
-			}
-			sc.Buffer(make([]byte, 0, min(4096, scannerMax)), scannerMax)
-			r.scanner = sc
-			r.maxLine = max
 		}
 
 		for r.scanner.Scan() {
 			line := r.scanner.Bytes()
 			if len(line) > r.maxLine {
-				r.err = errLineTooLong
+				r.err = ErrLineTooLong
 				yield(Message{}, r.err)
 				return
 			}
 			line = decodeUTF8(line)
 			if len(line) == 0 {
-				if msg, ok := r.dispatch(); ok {
-					if !yield(msg, nil) {
-						return
-					}
+				// Blank line: dispatch, and stop if the consumer breaks.
+				if msg, ok := r.dispatch(); ok && !yield(msg, nil) {
+					return
 				}
 				continue
 			}
@@ -179,10 +163,41 @@ func (r *Reader) Messages() iter.Seq2[Message, error] {
 		}
 
 		if err := r.scanner.Err(); err != nil {
+			// A token larger than the scanner buffer surfaces as bufio.ErrTooLong;
+			// normalise it to ErrLineTooLong so both over-limit paths report the
+			// same matchable error.
+			if errors.Is(err, bufio.ErrTooLong) {
+				err = ErrLineTooLong
+			}
 			r.err = err
 			yield(Message{}, err)
 		}
 	}
+}
+
+// initScanner lazily builds the line scanner: it strips a leading BOM, splits on
+// SSE line endings, and sizes the buffer to hold one MaxLineBytes token plus the
+// framing overhead the scanner needs for EOF detection and CRLF terminators
+// (kept out of the advertised limit, which applies only to token bytes).
+func (r *Reader) initScanner() error {
+	stripped, err := stripBOM(r.r)
+	if err != nil {
+		return err
+	}
+	max := r.MaxLineBytes
+	if max <= 0 {
+		max = defaultMaxLineBytes
+	}
+	scannerMax := max
+	if max <= math.MaxInt-2 {
+		scannerMax += 2
+	}
+	sc := bufio.NewScanner(stripped)
+	sc.Split(splitLine)
+	sc.Buffer(make([]byte, 0, min(4096, scannerMax)), scannerMax)
+	r.scanner = sc
+	r.maxLine = max
+	return nil
 }
 
 // decodeUTF8 applies the Encoding Standard's UTF-8 decoder in replacement
@@ -192,6 +207,13 @@ func (r *Reader) Messages() iter.Seq2[Message, error] {
 // Decoding line by line is equivalent to decoding the stream first because CR
 // and LF are ASCII bytes: neither can occur in a valid multi-byte sequence, and
 // the decoder reprocesses either byte as a line ending after an error.
+//
+// This is hand-rolled, not utf8.DecodeRune-in-a-loop nor bytes.ToValidUTF8,
+// because only this matches the standard's "maximal subpart" replacement, which
+// the Web Platform Tests pin by exact U+FFFD count. The stdlib options each
+// diverge on a different input: for "E0 A0 20" a DecodeRune loop emits two
+// U+FFFD (want one), and for "E0 80 80" bytes.ToValidUTF8 emits one (want
+// three). Do not replace this with either.
 func decodeUTF8(p []byte) []byte {
 	if utf8.Valid(p) {
 		return p

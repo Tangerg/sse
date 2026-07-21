@@ -9,6 +9,9 @@ fields (`data`, `event`, `id`, `retry`), the single-leading-space rule, and
 blank-line dispatch. It is a codec, not an EventSource client: automatic
 reconnection and request retries are the caller's responsibility.
 
+Full API reference and runnable examples:
+[pkg.go.dev/github.com/Tangerg/sse](https://pkg.go.dev/github.com/Tangerg/sse).
+
 ## Requirements
 
 Go 1.23 or later.
@@ -106,10 +109,10 @@ for msg, err := range sr.Messages() {
 ```
 
 A clean end of stream ends the loop without an error; malformed UTF-8 is decoded
-as `U+FFFD` per the Encoding Standard. A non-nil error means an I/O failure, a
-line exceeding the buffer limit, or `ErrEventTooLarge`. There is no context
-parameter: to interrupt a read blocked on a stalled connection, close
-`resp.Body`; to stop consuming, break out of the loop.
+as `U+FFFD` per the Encoding Standard. A non-nil error means an I/O failure,
+`ErrLineTooLong`, or `ErrEventTooLarge` (both matchable with `errors.Is`). There
+is no context parameter: to interrupt a read blocked on a stalled connection,
+close `resp.Body`; to stop consuming, break out of the loop.
 
 After the loop ends, `LastEventID()` and `Retry()` report the reconnection state
 — including values from standalone `id:` or `retry:` frames that carried no
@@ -181,8 +184,8 @@ func NewHTTPReader(resp *http.Response) (*Reader, error)
 func (r *Reader) Messages() iter.Seq2[Message, error]
 func (r *Reader) LastEventID() string
 func (r *Reader) Retry() (time.Duration, bool)
-// Reader.MaxLineBytes int  — per-line limit; 0 uses the 64 KiB default.
-// Reader.MaxEventBytes int — per-event data limit; 0 means unlimited.
+// Reader.MaxLineBytes int  — per-line limit; 0 uses the 64 KiB default (ErrLineTooLong).
+// Reader.MaxEventBytes int — per-event data limit; 0 means unlimited (ErrEventTooLarge).
 
 func NewWriter(w io.Writer) *Writer
 func NewHTTPWriter(rw http.ResponseWriter) *Writer

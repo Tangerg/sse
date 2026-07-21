@@ -6,6 +6,24 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.4] - 2026-07-21
+
+### Added
+
+- Exported `ErrLineTooLong`; a line exceeding `Reader.MaxLineBytes` now reports it
+  (including the `bufio.ErrTooLong` case), matchable with `errors.Is` and
+  symmetric with `ErrEventTooLarge`.
+- Runnable, output-verified `Example` functions (reading, writing, comments,
+  retry/reset control frames, reconnection state, and the HTTP reader/writer) so
+  pkg.go.dev renders documentation that `go test` checks.
+
+### Changed
+
+- Replaced the `int(^uint(0)>>1)` bit-trick with `math.MaxInt` (no behavior
+  change).
+- Extracted the reader's lazy scanner setup into `initScanner` and flattened the
+  dispatch loop's nesting (no behavior change).
+
 ## [0.0.3] - 2026-07-20
 
 ### Changed (breaking)
@@ -84,5 +102,6 @@ Initial release.
 
 [0.0.2]: https://github.com/Tangerg/sse/releases/tag/v0.0.2
 [0.0.1]: https://github.com/Tangerg/sse/releases/tag/v0.0.1
-[Unreleased]: https://github.com/Tangerg/sse/compare/v0.0.3...HEAD
+[Unreleased]: https://github.com/Tangerg/sse/compare/v0.0.4...HEAD
+[0.0.4]: https://github.com/Tangerg/sse/compare/v0.0.3...v0.0.4
 [0.0.3]: https://github.com/Tangerg/sse/compare/v0.0.2...v0.0.3

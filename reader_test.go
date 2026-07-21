@@ -171,19 +171,21 @@ func TestReaderMaxLineBytes(t *testing.T) {
 		data := strings.Repeat("x", max-len("data: ")+1)
 		r := NewReader(strings.NewReader("data: " + data + "\n\n"))
 		r.MaxLineBytes = max
-		if _, err := collectAllFrom(r); err == nil {
-			t.Fatal("expected an error for a line over MaxLineBytes")
+		if _, err := collectAllFrom(r); !errors.Is(err, ErrLineTooLong) {
+			t.Fatalf("error = %v, want ErrLineTooLong", err)
 		}
 	})
 
+	// A line larger than the scanner buffer surfaces via bufio; it must be
+	// normalised to the same ErrLineTooLong as the in-loop check.
 	t.Run("default limit rejects oversized line", func(t *testing.T) {
 		r := NewReader(strings.NewReader(input))
 		var gotErr error
 		for _, err := range r.Messages() {
 			gotErr = err
 		}
-		if gotErr == nil {
-			t.Error("expected error for line exceeding 64 KiB, got nil")
+		if !errors.Is(gotErr, ErrLineTooLong) {
+			t.Errorf("error = %v, want ErrLineTooLong", gotErr)
 		}
 	})
 
