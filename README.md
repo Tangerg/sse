@@ -1,5 +1,8 @@
 # sse
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/Tangerg/sse.svg)](https://pkg.go.dev/github.com/Tangerg/sse)
+[![CI](https://github.com/Tangerg/sse/actions/workflows/ci.yml/badge.svg)](https://github.com/Tangerg/sse/actions/workflows/ci.yml)
+
 A small Go library for reading and writing
 [Server-Sent Events (SSE)](https://html.spec.whatwg.org/multipage/server-sent-events.html).
 
