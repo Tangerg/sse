@@ -6,6 +6,33 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Added `Reader.Read`, a pull-style API that returns one event at a time and
+  reports a clean end of stream as `io.EOF`, following the conventional
+  `encoding/*` reader shape. `Read` and `Messages` share one stream position.
+
+### Changed
+
+- Made `Reader.Read` the core consumption primitive and reduced `Messages` to a
+  thin iterator adapter over it, giving both APIs identical state and error
+  semantics.
+- Simplified line splitting to select the first CR/LF terminator directly while
+  preserving adversarial CRLF chunk-boundary handling.
+- Replaced the two-pass retry validation/conversion with one saturating decimal
+  parser that still validates every byte after overflow.
+
+### Tests
+
+- Pinned the minimum-version CI lane to Go 1.23.0, the exact version promised by
+  `go.mod`, rather than floating to the latest Go 1.23 patch release.
+
+## [0.0.5] - 2026-07-21
+
+### Documentation
+
+- Added Go Reference and CI status badges to the README.
+
 ## [0.0.4] - 2026-07-21
 
 ### Added
@@ -102,6 +129,7 @@ Initial release.
 
 [0.0.2]: https://github.com/Tangerg/sse/releases/tag/v0.0.2
 [0.0.1]: https://github.com/Tangerg/sse/releases/tag/v0.0.1
-[Unreleased]: https://github.com/Tangerg/sse/compare/v0.0.4...HEAD
+[Unreleased]: https://github.com/Tangerg/sse/compare/v0.0.5...HEAD
+[0.0.5]: https://github.com/Tangerg/sse/compare/v0.0.4...v0.0.5
 [0.0.4]: https://github.com/Tangerg/sse/compare/v0.0.3...v0.0.4
 [0.0.3]: https://github.com/Tangerg/sse/compare/v0.0.2...v0.0.3

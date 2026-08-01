@@ -35,7 +35,9 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go: ['1.23', 'stable']
+        # Keep the lower bound exact so newer patch releases cannot mask an
+        # accidental dependency on behavior absent from the promised minimum.
+        go: ['1.23.0', 'stable']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
