@@ -22,6 +22,8 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Pinned the minimum-version CI lane to Go 1.23.0, the exact version promised by
   `go.mod`, rather than floating to the latest Go 1.23 patch release.
+- Upgraded the GitHub Actions runtime to `checkout` and `setup-go` v7 and
+  disabled the unused module cache for this dependency-free package.
 
 ## [0.0.5] - 2026-07-21
 

@@ -14,10 +14,11 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
+          cache: false
 
       - name: gofmt
         run: |
@@ -39,10 +40,11 @@ jobs:
         # accidental dependency on behavior absent from the promised minimum.
         go: ['1.23.0', 'stable']
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go }}
+          cache: false
 
       - name: vet
         run: go vet ./...
