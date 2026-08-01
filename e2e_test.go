@@ -228,7 +228,11 @@ func TestE2E_EarlyClientStop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cleanupResponse(t, resp)
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Errorf("close response body: %v", err)
+		}
+	}()
 
 	<-started
 

@@ -8,7 +8,6 @@ import (
 	"io"
 	"iter"
 	"math"
-	"strconv"
 	"time"
 	"unicode/utf8"
 )
@@ -357,39 +356,50 @@ func (r *Reader) parseLine(line []byte) error {
 		r.dataBuf.Write(value)
 		r.dataBuf.WriteByte('\n')
 	case fieldRetry:
-		// §9.2.6: the value must consist solely of ASCII digits; otherwise the
-		// field is ignored entirely. Validate that first — ParseUint can report
-		// ErrRange on a numeric overflow before it reaches a trailing non-digit,
-		// which would otherwise be misread as a valid (clamped) value. After the
-		// check, the only possible ParseUint error is overflow of an all-digit
-		// value, which is a valid integer per the spec and is clamped.
-		if !isASCIIDigits(value) {
+		retry, ok := parseRetry(value)
+		if !ok {
 			return nil
 		}
-		ms, err := strconv.ParseUint(string(value), 10, 64)
-		switch {
-		case err != nil, ms > maxRetryMS: // overflow of an all-digit value → clamp
-			r.retry = time.Duration(math.MaxInt64)
-		default:
-			r.retry = time.Duration(ms) * time.Millisecond
-		}
+		r.retry = retry
 		r.retrySet = true
 	}
 	return nil
 }
 
-// isASCIIDigits reports whether b is non-empty and consists solely of the ASCII
-// digits 0-9, as required for a retry value by §9.2.6.
-func isASCIIDigits(b []byte) bool {
+// parseRetry parses the §9.2.6 retry field: a non-empty sequence of ASCII
+// decimal digits interpreted as milliseconds. Values too large for a
+// time.Duration are clamped instead of wrapping.
+//
+// Parsing is saturating but validation is not short-circuited after overflow:
+// every remaining byte must still be a digit, otherwise the entire field is
+// invalid and the previous retry value must be preserved.
+func parseRetry(b []byte) (time.Duration, bool) {
 	if len(b) == 0 {
-		return false
+		return 0, false
 	}
+
+	var milliseconds uint64
+	var saturated bool
 	for _, c := range b {
 		if c < '0' || c > '9' {
-			return false
+			return 0, false
 		}
+		if saturated {
+			continue
+		}
+
+		digit := uint64(c - '0')
+		if milliseconds > maxRetryMS/10 ||
+			milliseconds == maxRetryMS/10 && digit > maxRetryMS%10 {
+			saturated = true
+			continue
+		}
+		milliseconds = milliseconds*10 + digit
 	}
-	return true
+	if saturated {
+		return time.Duration(math.MaxInt64), true
+	}
+	return time.Duration(milliseconds) * time.Millisecond, true
 }
 
 // dispatch runs the §9.2.6 dispatch algorithm for a blank line. Step 1 copies

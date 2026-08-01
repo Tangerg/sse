@@ -142,7 +142,7 @@ func ExampleNewHTTPReader() {
 	if err != nil {
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	r, err := sse.NewHTTPReader(resp)
 	if err != nil {

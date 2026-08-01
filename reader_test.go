@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"math"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -376,6 +377,28 @@ func TestReaderMessages(t *testing.T) {
 		}
 		if retry, ok := r.Retry(); !ok || retry != time.Duration(math.MaxInt64) {
 			t.Errorf("Retry() = (%v, %v), want (%v, true)", retry, ok, time.Duration(math.MaxInt64))
+		}
+	})
+
+	t.Run("retry duration boundary", func(t *testing.T) {
+		tests := []struct {
+			name string
+			ms   uint64
+			want time.Duration
+		}{
+			{"largest whole-millisecond duration", maxRetryMS, time.Duration(maxRetryMS) * time.Millisecond},
+			{"one millisecond over duration range", maxRetryMS + 1, time.Duration(math.MaxInt64)},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				r := NewReader(strings.NewReader("retry: " + strconv.FormatUint(tt.ms, 10) + "\n"))
+				if _, err := collectAllFrom(r); err != nil {
+					t.Fatal(err)
+				}
+				if got, ok := r.Retry(); !ok || got != tt.want {
+					t.Errorf("Retry() = (%v, %v), want (%v, true)", got, ok, tt.want)
+				}
+			})
 		}
 	})
 
