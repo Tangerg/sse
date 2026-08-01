@@ -3,6 +3,7 @@ package sse_test
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -27,6 +28,26 @@ func Example() {
 	// Output:
 	// [greeting] "hello"
 	// [message] "line one\nline two"
+}
+
+// ExampleReader_Read reads one event at a time, following the usual stdlib
+// Reader convention of reporting a clean end of input as io.EOF.
+func ExampleReader_Read() {
+	r := sse.NewReader(strings.NewReader("data: first\n\ndata: second\n\n"))
+	for {
+		msg, err := r.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			fmt.Println("error:", err)
+			return
+		}
+		fmt.Println(string(msg.Data))
+	}
+	// Output:
+	// first
+	// second
 }
 
 // ExampleWriter encodes one event. The frame ends with a blank line, which is

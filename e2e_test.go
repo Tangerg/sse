@@ -27,13 +27,22 @@ func connect(t *testing.T, srv *httptest.Server) *sse.Reader {
 	if err != nil {
 		t.Fatalf("GET %s: %v", srv.URL, err)
 	}
-	t.Cleanup(func() { resp.Body.Close() })
+	cleanupResponse(t, resp)
 
 	r, err := sse.NewHTTPReader(resp)
 	if err != nil {
 		t.Fatalf("NewHTTPReader: %v", err)
 	}
 	return r
+}
+
+func cleanupResponse(t *testing.T, resp *http.Response) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Errorf("close response body: %v", err)
+		}
+	})
 }
 
 // collectAll reads every message from r until the stream ends.
@@ -219,7 +228,7 @@ func TestE2E_EarlyClientStop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	cleanupResponse(t, resp)
 
 	<-started
 
@@ -302,7 +311,7 @@ func TestE2E_ResponseHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	cleanupResponse(t, resp)
 
 	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream; charset=utf-8" {
 		t.Errorf("Content-Type = %q, want %q", ct, "text/event-stream; charset=utf-8")

@@ -253,6 +253,51 @@ func TestReaderMessagesCalledTwice(t *testing.T) {
 	}
 }
 
+func TestReaderRead(t *testing.T) {
+	r := NewReader(strings.NewReader(": heartbeat\n\nretry: 1500\n\ndata: first\n\ndata: second\n\n"))
+
+	first, err := r.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(first.Data); got != "first" {
+		t.Errorf("first Data = %q, want %q", got, "first")
+	}
+	if retry, ok := r.Retry(); !ok || retry != 1500*time.Millisecond {
+		t.Errorf("Retry() = (%v, %v), want (1.5s, true)", retry, ok)
+	}
+
+	second, err := r.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(second.Data); got != "second" {
+		t.Errorf("second Data = %q, want %q", got, "second")
+	}
+
+	if _, err := r.Read(); err != io.EOF {
+		t.Errorf("third Read error = %v, want io.EOF", err)
+	}
+	if _, err := r.Read(); err != io.EOF {
+		t.Errorf("Read after EOF error = %v, want io.EOF", err)
+	}
+}
+
+func TestReaderReadAndMessagesSharePosition(t *testing.T) {
+	r := NewReader(strings.NewReader("data: first\n\ndata: second\n\n"))
+	if _, err := r.Read(); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, err := collectAllFrom(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || string(msgs[0].Data) != "second" {
+		t.Errorf("Messages after Read = %v, want only second event", msgs)
+	}
+}
+
 func TestReaderMessages(t *testing.T) {
 	t.Run("basic data field", func(t *testing.T) {
 		msgs, err := collectMessages("data: hello\n\n")

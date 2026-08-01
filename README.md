@@ -111,6 +111,10 @@ for msg, err := range sr.Messages() {
 }
 ```
 
+For pull-style consumption, `Read` returns one event at a time and reports a
+clean end of stream as `io.EOF`, following the usual `encoding/*` reader
+convention. `Read` and `Messages` share the same stream position.
+
 A clean end of stream ends the loop without an error; malformed UTF-8 is decoded
 as `U+FFFD` per the Encoding Standard. A non-nil error means an I/O failure,
 `ErrLineTooLong`, or `ErrEventTooLarge` (both matchable with `errors.Is`). There
@@ -144,8 +148,8 @@ for msg, err := range sr.Messages() {
 ### Large payloads
 
 The default per-line limit is 64 KiB. Raise `MaxLineBytes` before the first call
-to `Messages` when a single `data` field may be larger (e.g. a serialised JSON
-object):
+to `Read` or `Messages` when a single `data` field may be larger (e.g. a
+serialised JSON object):
 
 ```go
 sr := sse.NewReader(r)
@@ -184,6 +188,7 @@ type Message struct {
 
 func NewReader(r io.Reader) *Reader
 func NewHTTPReader(resp *http.Response) (*Reader, error)
+func (r *Reader) Read() (Message, error)
 func (r *Reader) Messages() iter.Seq2[Message, error]
 func (r *Reader) LastEventID() string
 func (r *Reader) Retry() (time.Duration, bool)

@@ -21,9 +21,10 @@ const defaultMaxLineBytes = 64 * 1024
 // clamped to the maximum duration rather than wrapping to a negative one.
 const maxRetryMS = uint64(math.MaxInt64 / int64(time.Millisecond))
 
-// ErrEventTooLarge is reported by Messages when a single event's buffered data
-// exceeds Reader.MaxEventBytes; ErrLineTooLong when a single line exceeds
-// Reader.MaxLineBytes. Both are matchable with errors.Is.
+// ErrEventTooLarge is reported by [Reader.Read] when a single event's buffered
+// data exceeds [Reader.MaxEventBytes]; ErrLineTooLong when a single line exceeds
+// [Reader.MaxLineBytes]. [Reader.Messages] yields the same errors. Both are
+// matchable with [errors.Is].
 var (
 	ErrEventTooLarge = errors.New("sse: event too large")
 	ErrLineTooLong   = errors.New("sse: line exceeds MaxLineBytes")
@@ -36,20 +37,21 @@ var (
 type Reader struct {
 	// MaxLineBytes caps the size in bytes of a single line (one field), excluding
 	// its CR/LF terminator. A value of zero or less uses the 64 KiB default. It
-	// must be set before the first call to Messages; later changes have no effect.
-	// Raise it when a single data field may exceed 64 KiB (e.g. a large JSON
-	// payload).
+	// must be set before the first call to Read or Messages; later changes have no
+	// effect. Raise it when a single data field may exceed 64 KiB (e.g. a large
+	// JSON payload).
 	MaxLineBytes int
 
 	// MaxEventBytes caps the total data buffered for a single event across all
 	// its data lines. A value of zero or less means no limit. When the limit is
-	// exceeded Messages yields ErrEventTooLarge. Set it when consuming untrusted
-	// streams, where many small data lines could otherwise grow without bound.
+	// exceeded Read returns ErrEventTooLarge and Messages yields it. Set the limit
+	// when consuming untrusted streams, where many small data lines could
+	// otherwise grow without bound.
 	MaxEventBytes int
 
 	r       io.Reader
 	scanner *bufio.Scanner
-	err     error // terminal error: once set, parsing never resumes
+	err     error // terminal result, including io.EOF
 	maxLine int   // effective MaxLineBytes captured when scanner is created
 
 	// Dispatch state (§9.2.6). idBuffer is the last-event-ID buffer, updated as
@@ -68,7 +70,7 @@ type Reader struct {
 
 // NewReader returns a Reader that parses the SSE stream from r. It panics if r
 // is nil. No I/O happens during construction; the stream is read lazily on the
-// first call to Messages.
+// first call to Read or Messages.
 func NewReader(r io.Reader) *Reader {
 	if r == nil {
 		panic("sse: reader cannot be nil")
@@ -109,17 +111,67 @@ func (r *Reader) LastEventID() string {
 	return r.lastEventID
 }
 
+// Read reads and returns the next event in the stream.
+//
+// Read skips comments and control-only frames. It returns [io.EOF] after a
+// clean end of stream; per §9.2.6, any event left incomplete at EOF is
+// discarded. On failure it returns a zero [Message] and the underlying I/O
+// error, [ErrLineTooLong], or [ErrEventTooLarge]. EOF and errors are terminal:
+// subsequent calls return the same result.
+//
+// The scanner is created lazily on the first call. Read and [Reader.Messages]
+// share the same stream position and may be used interchangeably, but a Reader
+// must not be used concurrently.
+func (r *Reader) Read() (Message, error) {
+	if r.err != nil {
+		return Message{}, r.err
+	}
+	if r.scanner == nil {
+		if err := r.initScanner(); err != nil {
+			r.err = err
+			return Message{}, err
+		}
+	}
+
+	for r.scanner.Scan() {
+		line := r.scanner.Bytes()
+		if len(line) > r.maxLine {
+			r.err = ErrLineTooLong
+			return Message{}, r.err
+		}
+		line = decodeUTF8(line)
+		if len(line) == 0 {
+			if msg, ok := r.dispatch(); ok {
+				return msg, nil
+			}
+			continue
+		}
+		if err := r.parseLine(line); err != nil {
+			r.err = err
+			return Message{}, err
+		}
+	}
+
+	r.err = r.scanner.Err()
+	if errors.Is(r.err, bufio.ErrTooLong) {
+		// Normalise the scanner's buffer error to the package sentinel so both
+		// over-limit paths have the same matchable result.
+		r.err = ErrLineTooLong
+	}
+	if r.err == nil {
+		r.err = io.EOF
+	}
+	return Message{}, r.err
+}
+
 // Messages returns an iterator over every event in the stream.
 //
 // The iterator scans line by line: non-empty lines update the field buffers and
 // blank lines dispatch the accumulated event (§9.2.6). A blank line whose data
 // buffer is empty dispatches nothing and is skipped.
 //
-// The pair yielded on failure carries a zero Message and a non-nil error (an
-// I/O error, ErrLineTooLong, or ErrEventTooLarge); the iterator then stops.
-// A clean end of stream (EOF) yields nothing — the loop simply
-// ends. Per §9.2.6, data left buffered at EOF without a trailing blank line is
-// discarded.
+// The pair yielded on failure carries a zero Message and a non-nil error from
+// [Reader.Read]; the iterator then stops. A clean end of stream yields nothing.
 //
 // There is no context parameter: to interrupt a read that is blocked on a
 // stalled connection, close the underlying reader (e.g. resp.Body.Close());
@@ -127,50 +179,18 @@ func (r *Reader) LastEventID() string {
 // on the first call and reused across calls, so state is preserved between them.
 func (r *Reader) Messages() iter.Seq2[Message, error] {
 	return func(yield func(Message, error) bool) {
-		// A prior error is terminal: never resume parsing after one.
-		if r.err != nil {
-			yield(Message{}, r.err)
-			return
-		}
-		if r.scanner == nil {
-			if err := r.initScanner(); err != nil {
-				r.err = err
+		for {
+			msg, err := r.Read()
+			if err == io.EOF {
+				return
+			}
+			if err != nil {
 				yield(Message{}, err)
 				return
 			}
-		}
-
-		for r.scanner.Scan() {
-			line := r.scanner.Bytes()
-			if len(line) > r.maxLine {
-				r.err = ErrLineTooLong
-				yield(Message{}, r.err)
+			if !yield(msg, nil) {
 				return
 			}
-			line = decodeUTF8(line)
-			if len(line) == 0 {
-				// Blank line: dispatch, and stop if the consumer breaks.
-				if msg, ok := r.dispatch(); ok && !yield(msg, nil) {
-					return
-				}
-				continue
-			}
-			if err := r.parseLine(line); err != nil {
-				r.err = err
-				yield(Message{}, err)
-				return
-			}
-		}
-
-		if err := r.scanner.Err(); err != nil {
-			// A token larger than the scanner buffer surfaces as bufio.ErrTooLong;
-			// normalise it to ErrLineTooLong so both over-limit paths report the
-			// same matchable error.
-			if errors.Is(err, bufio.ErrTooLong) {
-				err = ErrLineTooLong
-			}
-			r.err = err
-			yield(Message{}, err)
 		}
 	}
 }
@@ -328,8 +348,9 @@ func (r *Reader) parseLine(line []byte) error {
 		// writing so oversized data never enters the buffer; the subtraction
 		// avoids the overflow that len+len could produce.
 		if max := r.MaxEventBytes; max > 0 {
-			needed := len(value) + 1 // value + LF
-			if needed > max || r.dataBuf.Len() > max-needed {
+			// Account for the appended LF without computing len(value)+1, which
+			// could overflow for a theoretical maximum-sized slice.
+			if len(value) >= max || r.dataBuf.Len() > max-len(value)-1 {
 				return ErrEventTooLarge
 			}
 		}

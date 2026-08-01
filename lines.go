@@ -24,40 +24,24 @@ func splitLine(data []byte, atEOF bool) (advance int, token []byte, err error) {
 		return 0, nil, nil
 	}
 
-	lfIdx := bytes.IndexByte(data, '\n')
-	crIdx := bytes.IndexByte(data, '\r')
-
-	switch {
-	case lfIdx < 0 && crIdx < 0:
+	i := bytes.IndexAny(data, "\r\n")
+	if i < 0 {
 		// No terminator yet. Flush whatever remains at EOF; otherwise wait.
 		if atEOF {
 			return len(data), data, nil
 		}
 		return 0, nil, nil
-
-	case crIdx < 0:
-		// LF only.
-		return lfIdx + 1, data[:lfIdx], nil
-
-	case lfIdx < 0:
-		// CR only. Defer if it is the last byte and more data may follow:
-		// the next read could turn this CR into the start of a CRLF pair.
-		if crIdx == len(data)-1 && !atEOF {
-			return 0, nil, nil
-		}
-		return crIdx + 1, data[:crIdx], nil
-
-	case crIdx+1 == lfIdx:
-		// CRLF pair — consume both, token excludes the CR.
-		return lfIdx + 1, data[:crIdx], nil
-
-	case crIdx < lfIdx:
-		// Lone CR appears before a later LF on its own line.
-		return crIdx + 1, data[:crIdx], nil
-
-	default:
-		// lfIdx < crIdx: LF terminates the current line; the CR belongs to
-		// a later line.
-		return lfIdx + 1, data[:lfIdx], nil
 	}
+
+	// A trailing CR is ambiguous until another byte arrives: it could be a lone
+	// terminator or the first half of CRLF.
+	if data[i] == '\r' && i+1 == len(data) && !atEOF {
+		return 0, nil, nil
+	}
+
+	advance = i + 1
+	if data[i] == '\r' && i+1 < len(data) && data[i+1] == '\n' {
+		advance++
+	}
+	return advance, data[:i], nil
 }
