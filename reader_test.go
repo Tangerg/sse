@@ -254,10 +254,10 @@ func TestReaderMessagesCalledTwice(t *testing.T) {
 	}
 }
 
-func TestReaderRead(t *testing.T) {
+func TestReaderReadPrimitive(t *testing.T) {
 	r := NewReader(strings.NewReader(": heartbeat\n\nretry: 1500\n\ndata: first\n\ndata: second\n\n"))
 
-	first, err := r.Read()
+	first, err := r.read()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +268,7 @@ func TestReaderRead(t *testing.T) {
 		t.Errorf("Retry() = (%v, %v), want (1.5s, true)", retry, ok)
 	}
 
-	second, err := r.Read()
+	second, err := r.read()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,17 +276,17 @@ func TestReaderRead(t *testing.T) {
 		t.Errorf("second Data = %q, want %q", got, "second")
 	}
 
-	if _, err := r.Read(); err != io.EOF {
-		t.Errorf("third Read error = %v, want io.EOF", err)
+	if _, err := r.read(); err != io.EOF {
+		t.Errorf("third read error = %v, want io.EOF", err)
 	}
-	if _, err := r.Read(); err != io.EOF {
-		t.Errorf("Read after EOF error = %v, want io.EOF", err)
+	if _, err := r.read(); err != io.EOF {
+		t.Errorf("read after EOF error = %v, want io.EOF", err)
 	}
 }
 
-func TestReaderReadAndMessagesSharePosition(t *testing.T) {
+func TestReaderReadPrimitiveSharesPosition(t *testing.T) {
 	r := NewReader(strings.NewReader("data: first\n\ndata: second\n\n"))
-	if _, err := r.Read(); err != nil {
+	if _, err := r.read(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -295,7 +295,7 @@ func TestReaderReadAndMessagesSharePosition(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(msgs) != 1 || string(msgs[0].Data) != "second" {
-		t.Errorf("Messages after Read = %v, want only second event", msgs)
+		t.Errorf("Messages after read = %v, want only second event", msgs)
 	}
 }
 

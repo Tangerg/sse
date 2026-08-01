@@ -6,17 +6,11 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added
-
-- Added `Reader.Read`, a pull-style API that returns one event at a time and
-  reports a clean end of stream as `io.EOF`, following the conventional
-  `encoding/*` reader shape. `Read` and `Messages` share one stream position.
-
 ### Changed
 
-- Made `Reader.Read` the core consumption primitive and reduced `Messages` to a
-  thin iterator adapter over it, giving both APIs identical state and error
-  semantics.
+- Refactored `Reader` around an unexported single-event parsing primitive while
+  keeping `Messages` as the only public consumption API and preserving its
+  behavior.
 - Simplified line splitting to select the first CR/LF terminator directly while
   preserving adversarial CRLF chunk-boundary handling.
 - Replaced the two-pass retry validation/conversion with one saturating decimal

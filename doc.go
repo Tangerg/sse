@@ -12,9 +12,9 @@
 //
 // # Reading
 //
-// A [Reader] yields one [Message] per event. [Reader.Read] reads one event at a
-// time and returns [io.EOF] at the clean end of the stream. [Reader.Messages]
-// provides a range-over-func iterator over the same state machine.
+// A [Reader] yields one [Message] per event. [Reader.Messages] returns a
+// range-over-func iterator; a clean end of stream ends the loop without an
+// error.
 //
 //	resp, _ := http.Get(url)
 //	defer resp.Body.Close()
@@ -31,8 +31,8 @@
 // read blocked on a stalled connection, close the underlying reader; to stop
 // early, break the loop. When a single data field may exceed 64 KiB (e.g. a
 // large JSON payload), raise [Reader.MaxLineBytes] before the first call to
-// Read or Messages; for untrusted input, set [Reader.MaxEventBytes] to bound the
-// total size of one event.
+// Messages; for untrusted input, set [Reader.MaxEventBytes] to bound the total
+// size of one event.
 //
 // After the loop ends, [Reader.LastEventID] and [Reader.Retry] report the
 // reconnection state needed to reconnect — including values from standalone

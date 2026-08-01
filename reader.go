@@ -20,10 +20,9 @@ const defaultMaxLineBytes = 64 * 1024
 // clamped to the maximum duration rather than wrapping to a negative one.
 const maxRetryMS = uint64(math.MaxInt64 / int64(time.Millisecond))
 
-// ErrEventTooLarge is reported by [Reader.Read] when a single event's buffered
-// data exceeds [Reader.MaxEventBytes]; ErrLineTooLong when a single line exceeds
-// [Reader.MaxLineBytes]. [Reader.Messages] yields the same errors. Both are
-// matchable with [errors.Is].
+// ErrEventTooLarge is yielded by [Reader.Messages] when a single event's
+// buffered data exceeds [Reader.MaxEventBytes]; ErrLineTooLong when a single
+// line exceeds [Reader.MaxLineBytes]. Both are matchable with [errors.Is].
 var (
 	ErrEventTooLarge = errors.New("sse: event too large")
 	ErrLineTooLong   = errors.New("sse: line exceeds MaxLineBytes")
@@ -36,16 +35,15 @@ var (
 type Reader struct {
 	// MaxLineBytes caps the size in bytes of a single line (one field), excluding
 	// its CR/LF terminator. A value of zero or less uses the 64 KiB default. It
-	// must be set before the first call to Read or Messages; later changes have no
-	// effect. Raise it when a single data field may exceed 64 KiB (e.g. a large
-	// JSON payload).
+	// must be set before the first call to Messages; later changes have no effect.
+	// Raise it when a single data field may exceed 64 KiB (e.g. a large JSON
+	// payload).
 	MaxLineBytes int
 
 	// MaxEventBytes caps the total data buffered for a single event across all
 	// its data lines. A value of zero or less means no limit. When the limit is
-	// exceeded Read returns ErrEventTooLarge and Messages yields it. Set the limit
-	// when consuming untrusted streams, where many small data lines could
-	// otherwise grow without bound.
+	// exceeded Messages yields ErrEventTooLarge. Set it when consuming untrusted
+	// streams, where many small data lines could otherwise grow without bound.
 	MaxEventBytes int
 
 	r       io.Reader
@@ -69,7 +67,7 @@ type Reader struct {
 
 // NewReader returns a Reader that parses the SSE stream from r. It panics if r
 // is nil. No I/O happens during construction; the stream is read lazily on the
-// first call to Read or Messages.
+// first call to Messages.
 func NewReader(r io.Reader) *Reader {
 	if r == nil {
 		panic("sse: reader cannot be nil")
@@ -110,18 +108,14 @@ func (r *Reader) LastEventID() string {
 	return r.lastEventID
 }
 
-// Read reads and returns the next event in the stream.
+// read returns the next event in the stream. It is the single parsing primitive
+// used by Messages, keeping iteration, terminal errors, and stream position in
+// one state machine.
 //
-// Read skips comments and control-only frames. It returns [io.EOF] after a
-// clean end of stream; per §9.2.6, any event left incomplete at EOF is
-// discarded. On failure it returns a zero [Message] and the underlying I/O
-// error, [ErrLineTooLong], or [ErrEventTooLarge]. EOF and errors are terminal:
-// subsequent calls return the same result.
-//
-// The scanner is created lazily on the first call. Read and [Reader.Messages]
-// share the same stream position and may be used interchangeably, but a Reader
-// must not be used concurrently.
-func (r *Reader) Read() (Message, error) {
+// It skips comments and control-only frames, returns io.EOF after a clean end
+// of stream, and discards any event left incomplete at EOF per §9.2.6. EOF and
+// errors are terminal: subsequent calls return the same result.
+func (r *Reader) read() (Message, error) {
 	if r.err != nil {
 		return Message{}, r.err
 	}
@@ -169,8 +163,9 @@ func (r *Reader) Read() (Message, error) {
 // blank lines dispatch the accumulated event (§9.2.6). A blank line whose data
 // buffer is empty dispatches nothing and is skipped.
 //
-// The pair yielded on failure carries a zero Message and a non-nil error from
-// [Reader.Read]; the iterator then stops. A clean end of stream yields nothing.
+// The pair yielded on failure carries a zero Message and a non-nil error (an
+// I/O error, ErrLineTooLong, or ErrEventTooLarge); the iterator then stops. A
+// clean end of stream yields nothing.
 //
 // There is no context parameter: to interrupt a read that is blocked on a
 // stalled connection, close the underlying reader (e.g. resp.Body.Close());
@@ -179,7 +174,7 @@ func (r *Reader) Read() (Message, error) {
 func (r *Reader) Messages() iter.Seq2[Message, error] {
 	return func(yield func(Message, error) bool) {
 		for {
-			msg, err := r.Read()
+			msg, err := r.read()
 			if err == io.EOF {
 				return
 			}
